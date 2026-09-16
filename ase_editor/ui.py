@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import os
 from pathlib import Path
 import math
 import re
 import sys
 
-from PySide6.QtCore import QPoint, QPointF, QRegularExpression, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRegularExpression, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -65,7 +67,59 @@ ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_SCENARIO = ROOT / "WIHH_example.txt"
 DEFAULT_SECTOR = ROOT / "WIII_Demo.sct"
 ASSET_DIR = ROOT / "asset"
-RANGE_PRESETS_NM = (10, 20, 40, 80, 120)
+RANGE_PRESETS_NM = (0.1, 0.5, 1, 2, 5, 10)
+METERS_PER_NM = 1852.0
+SETTINGS_ORGANIZATION = "ASEEditor"
+SETTINGS_APPLICATION = "EuroScopeScenarioStudio"
+SETTINGS_PATH_ENV = "ASE_EDITOR_SETTINGS_PATH"
+DIAGRAM_SOURCES = ("SID", "STAR", "GEO")
+DEFAULT_AIRCRAFT_LENGTH_METERS = 39.5
+DEFAULT_VEHICLE_LENGTH_METERS = 6.0
+MIN_AIRCRAFT_ICON_PIXELS = 30.0
+MIN_VEHICLE_ICON_PIXELS = 40.0
+MAX_TARGET_ICON_PIXELS = 160.0
+AIRCRAFT_LENGTH_METERS = {
+    "A318": 31.4,
+    "A319": 33.8,
+    "A320": 37.6,
+    "A321": 44.5,
+    "A332": 58.8,
+    "A333": 63.7,
+    "A339": 63.7,
+    "A343": 59.4,
+    "A346": 75.4,
+    "A359": 66.8,
+    "A35K": 73.8,
+    "A388": 72.7,
+    "B737": 33.6,
+    "B738": 39.5,
+    "B739": 42.1,
+    "B744": 70.7,
+    "B748": 76.3,
+    "B752": 47.3,
+    "B763": 54.9,
+    "B772": 63.7,
+    "B773": 73.9,
+    "B77L": 63.7,
+    "B77W": 73.9,
+    "B788": 56.7,
+    "B789": 63.0,
+    "B78X": 68.3,
+    "C172": 8.3,
+    "C208": 12.7,
+    "E190": 36.2,
+    "E195": 41.5,
+}
+VEHICLE_LENGTH_METERS = {
+    "AMB": 6.5,
+    "FIR": 9.0,
+    "TUG": 5.0,
+    "FOL": 4.8,
+    "OPS": 4.8,
+    "MNT": 6.0,
+    "RSC": 8.5,
+    "RWY": 4.8,
+}
 VEHICLE_ASSETS = {
     "AMB": "Ambulance.png",
     "FIR": "FireTruck.png",
@@ -96,7 +150,7 @@ LINE_SOURCE_LAYERS = {
     "RUNWAY": ("Geography",),
     "SID": ("Geography",),
     "STAR": ("Geography",),
-    "GEO": ("Geography",),
+    "GEO": ("",),
     "LOW AIRWAY": ("Low Airways",),
     "HIGH AIRWAY": ("High Airways",),
     "ARTCC": ("ARTCC",),
@@ -112,6 +166,38 @@ POINT_SOURCE_LAYERS = {
     "VOR": "VORs",
     "AIRPORT": "Airports",
 }
+
+
+def _app_settings() -> QSettings:
+    settings_path = os.environ.get(SETTINGS_PATH_ENV)
+    if settings_path:
+        return QSettings(settings_path, QSettings.Format.IniFormat)
+    return QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
+
+
+def _setting_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _setting_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item)]
+    text = str(value)
+    return [text] if text else []
+
+
+def _format_nm(value: float) -> str:
+    return f"{value:g}"
 
 
 def run() -> int:
@@ -145,7 +231,8 @@ class RadarCanvas(QWidget):
     aircraft_moved = Signal(object)
     map_clicked = Signal(float, float)
     cursor_geo_changed = Signal(float, float)
-    range_changed = Signal(int)
+    range_changed = Signal(float)
+    diagram_visibility_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -161,9 +248,9 @@ class RadarCanvas(QWidget):
         self.show_sector_lines = True
         self.show_fixes = True
         self.view_layers = dict(VIEW_LAYER_DEFAULTS)
-        self.hidden_diagram_labels: dict[str, set[str]] = {"SID": set(), "STAR": set(), "GEO": set()}
-        self.range_nm = 40
-        self.vector_minutes = 3
+        self.hidden_diagram_labels: dict[str, set[str]] = {source: set() for source in DIAGRAM_SOURCES}
+        self.range_nm = RANGE_PRESETS_NM[min(2, len(RANGE_PRESETS_NM) - 1)]
+        self.vector_minutes = 1
         self.pixels_per_nm = 8.0
         self.center_lat = -6.1
         self.center_lon = 106.8
@@ -220,6 +307,7 @@ class RadarCanvas(QWidget):
             hidden.discard(label)
         else:
             hidden.add(label)
+        self.diagram_visibility_changed.emit()
         self.update()
 
     def set_diagram_source_visible(self, source: str, labels: list[str], visible: bool) -> None:
@@ -228,9 +316,10 @@ class RadarCanvas(QWidget):
             hidden.difference_update(labels)
         else:
             hidden.update(labels)
+        self.diagram_visibility_changed.emit()
         self.update()
 
-    def set_range_nm(self, range_nm: int) -> None:
+    def set_range_nm(self, range_nm: float) -> None:
         self.range_nm = max(RANGE_PRESETS_NM[0], min(RANGE_PRESETS_NM[-1], range_nm))
         self._sync_scale_to_range()
         self.range_changed.emit(self.range_nm)
@@ -258,6 +347,8 @@ class RadarCanvas(QWidget):
                 if max_distance <= preset * 0.82:
                     self.range_nm = preset
                     break
+            else:
+                self.range_nm = RANGE_PRESETS_NM[-1]
         self._sync_scale_to_range()
         self.range_changed.emit(self.range_nm)
         self.update()
@@ -282,7 +373,23 @@ class RadarCanvas(QWidget):
             index = max(0, index - 1)
         else:
             index = min(len(RANGE_PRESETS_NM) - 1, index + 1)
-        self.set_range_nm(RANGE_PRESETS_NM[index])
+        new_range = RANGE_PRESETS_NM[index]
+        if new_range == self.range_nm:
+            return
+
+        cursor_position = event.position()
+        cursor_lat, cursor_lon = self.screen_to_geo(cursor_position)
+        self.range_nm = new_range
+        self._sync_scale_to_range()
+
+        x_nm = (cursor_position.x() - self.width() / 2.0) / self.pixels_per_nm
+        y_nm = (self.height() / 2.0 - cursor_position.y()) / self.pixels_per_nm
+        self.center_lat = cursor_lat - y_nm / 60.0
+        cos_lat = max(0.15, math.cos(math.radians(self.center_lat)))
+        self.center_lon = cursor_lon - x_nm / (60.0 * cos_lat)
+
+        self.range_changed.emit(self.range_nm)
+        self.update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self._last_mouse = event.position().toPoint()
@@ -388,7 +495,7 @@ class RadarCanvas(QWidget):
             value += grid_step_nm
 
         painter.setPen(QColor("#4cd7f6"))
-        painter.drawText(14, 22, f"SCOPE: WIHH  RANGE {self.range_nm} NM")
+        painter.drawText(14, 22, f"SCOPE: WIHH  RANGE {_format_nm(self.range_nm)} NM")
         painter.setPen(QColor("#bcc9cd"))
         painter.drawText(14, 38, f"CENTER {self.center_lat:.4f} {self.center_lon:.4f}")
 
@@ -515,9 +622,9 @@ class RadarCanvas(QWidget):
 
     def _draw_target_icon(self, painter: QPainter, aircraft: Aircraft, point: QPointF, selected: bool) -> None:
         pixmap = self._icon_for_aircraft(aircraft)
-        size = 34 if selected else 24
         if pixmap and not pixmap.isNull():
-            scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            size = self._target_icon_size(aircraft, pixmap)
+            scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             rotated = scaled.transformed(QTransform().rotate(aircraft.heading_degrees), Qt.SmoothTransformation)
             painter.drawPixmap(
                 int(point.x() - rotated.width() / 2),
@@ -525,11 +632,13 @@ class RadarCanvas(QWidget):
                 rotated,
             )
         else:
+            radius = max(2, int(round(self._target_icon_length_pixels(aircraft) / 2.0)))
             painter.setPen(QPen(QColor("#4cd7f6") if selected else QColor("#64748b"), 2))
-            painter.drawEllipse(point, 5, 5)
+            painter.drawEllipse(point, radius, radius)
 
     def _draw_tag(self, painter: QPainter, aircraft: Aircraft, point: QPointF, selected: bool) -> None:
-        block_origin = point + QPointF(38, -28 if selected else -22)
+        icon_radius = self._target_icon_length_pixels(aircraft) / 2.0
+        block_origin = point + QPointF(max(38.0, icon_radius + 14.0), -28 if selected else -22)
         painter.setFont(QFont("JetBrains Mono", 9 if selected else 8, QFont.Bold))
         if selected:
             width = 236
@@ -556,7 +665,17 @@ class RadarCanvas(QWidget):
         painter.setPen(QColor("#bcc9cd"))
         painter.drawText(12, self.height() - 18, f"ACTIVE TARGETS {len(self.scenario.aircraft):02d}  VECTOR {self.vector_minutes}M")
 
-    def _grid_step_nm(self) -> int:
+    def _grid_step_nm(self) -> float:
+        if self.range_nm <= 0.2:
+            return 0.02
+        if self.range_nm <= 0.5:
+            return 0.05
+        if self.range_nm <= 1:
+            return 0.1
+        if self.range_nm <= 2:
+            return 0.2
+        if self.range_nm <= 5:
+            return 0.5
         if self.range_nm <= 10:
             return 1
         if self.range_nm <= 20:
@@ -570,7 +689,8 @@ class RadarCanvas(QWidget):
         for aircraft in self.scenario.aircraft:
             screen = self.geo_to_screen(aircraft.latitude, aircraft.longitude)
             distance = math.hypot(screen.x() - point.x(), screen.y() - point.y())
-            if distance <= 22 and (nearest is None or distance < nearest[0]):
+            hit_radius = max(8.0, self._target_icon_length_pixels(aircraft) / 2.0)
+            if distance <= hit_radius and (nearest is None or distance < nearest[0]):
                 nearest = (distance, aircraft)
         return nearest[1] if nearest else None
 
@@ -602,6 +722,42 @@ class RadarCanvas(QWidget):
             prefix = aircraft.callsign[:3].upper()
             return self.icons.get(prefix) or self.icons.get(aircraft.flight_plan.aircraft_type[:3].upper())
         return self.icons.get("AIRCRAFT")
+
+    def _target_icon_size(self, aircraft: Aircraft, pixmap: QPixmap) -> QSize:
+        length_pixels = self._target_icon_length_pixels(aircraft)
+        source_longest_side = max(1, pixmap.width(), pixmap.height())
+        scale = length_pixels / source_longest_side
+        return QSize(
+            max(1, int(round(pixmap.width() * scale))),
+            max(1, int(round(pixmap.height() * scale))),
+        )
+
+    def _target_icon_length_pixels(self, aircraft: Aircraft) -> float:
+        length_meters = self._target_length_meters(aircraft)
+        physical_pixels = (length_meters / METERS_PER_NM) * self.pixels_per_nm
+        if aircraft.target_kind == "vehicle" or aircraft.symbol == "S":
+            minimum = MIN_VEHICLE_ICON_PIXELS
+        else:
+            minimum = MIN_AIRCRAFT_ICON_PIXELS
+        return max(minimum, min(MAX_TARGET_ICON_PIXELS, physical_pixels))
+
+    def _target_length_meters(self, aircraft: Aircraft) -> float:
+        if aircraft.target_kind == "vehicle" or aircraft.symbol == "S":
+            prefix = aircraft.callsign[:3].upper()
+            type_prefix = aircraft.flight_plan.aircraft_type[:3].upper()
+            return VEHICLE_LENGTH_METERS.get(prefix) or VEHICLE_LENGTH_METERS.get(type_prefix) or DEFAULT_VEHICLE_LENGTH_METERS
+
+        type_code = re.sub(r"[^A-Z0-9]", "", aircraft.flight_plan.aircraft_type.upper())
+        if type_code in AIRCRAFT_LENGTH_METERS:
+            return AIRCRAFT_LENGTH_METERS[type_code]
+        for known_type, length_meters in sorted(AIRCRAFT_LENGTH_METERS.items(), key=lambda item: len(item[0]), reverse=True):
+            if type_code.startswith(known_type):
+                return length_meters
+        if aircraft.wake_category.upper().startswith("H"):
+            return 70.0
+        if aircraft.wake_category.upper().startswith("L"):
+            return 20.0
+        return DEFAULT_AIRCRAFT_LENGTH_METERS
 
 
 class RouteTargetDock(QWidget):
@@ -1252,8 +1408,9 @@ class MainWindow(QMainWindow):
         self.strip_rows: list[ClickableFrame] = []
 
         self.canvas = RadarCanvas()
+        self.settings = _app_settings()
         self.layer_labels: dict[str, QLabel] = {}
-        self.range_label = QLabel("40 NM")
+        self.range_label = QLabel(f"{_format_nm(self.canvas.range_nm)} NM")
         self.cursor_label = QLabel("CTM05 CEILING:NFL195 000 27'42\"W")
         self.scenario_clock = QLabel("00:14:32Z")
         self.stack_count = QLabel("0 ACFT")
@@ -1265,6 +1422,7 @@ class MainWindow(QMainWindow):
         self.left_sidebar_collapsed = False
         self.view_layer_actions: dict[str, QAction] = {}
         self.pending_new_aircraft = False
+        self._load_view_layer_settings()
 
         self._build_menu_bar()
         self._build_tool_bar()
@@ -1301,7 +1459,7 @@ class MainWindow(QMainWindow):
         search.triggered.connect(self.search_aircraft)
         view_menu.addAction(search)
         view_menu.addSeparator()
-        for layer, checked in VIEW_LAYER_DEFAULTS.items():
+        for layer, checked in self.canvas.view_layers.items():
             action = QAction(layer, self)
             action.setCheckable(True)
             action.setChecked(checked)
@@ -1342,8 +1500,34 @@ class MainWindow(QMainWindow):
         self.scenario_toolbar = toolbar
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
+    def _load_view_layer_settings(self) -> None:
+        for layer, default in VIEW_LAYER_DEFAULTS.items():
+            value = self.settings.value(f"view_layers/{layer}")
+            self.canvas.view_layers[layer] = _setting_bool(value, default)
+
     def _set_view_layer(self, layer: str, visible: bool) -> None:
         self.canvas.set_view_layer_visible(layer, visible)
+        self.settings.setValue(f"view_layers/{layer}", visible)
+        self.settings.sync()
+
+    def _diagram_settings_key(self, path: Path, source: str) -> str:
+        sector_id = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
+        return f"diagram_visibility/{sector_id}/{source}"
+
+    def _load_diagram_visibility(self, path: Path) -> dict[str, set[str]]:
+        hidden_labels: dict[str, set[str]] = {source: set() for source in DIAGRAM_SOURCES}
+        for source in DIAGRAM_SOURCES:
+            value = self.settings.value(self._diagram_settings_key(path, source))
+            hidden_labels[source] = set(_setting_string_list(value))
+        return hidden_labels
+
+    def _save_diagram_visibility(self) -> None:
+        if self.sector_path is None:
+            return
+        for source in DIAGRAM_SOURCES:
+            hidden = sorted(self.canvas.hidden_diagram_labels.get(source, set()))
+            self.settings.setValue(self._diagram_settings_key(self.sector_path, source), hidden)
+        self.settings.sync()
 
     def open_diagrams_dialog(self) -> None:
         if self.diagram_dialog is not None:
@@ -1485,12 +1669,12 @@ class MainWindow(QMainWindow):
         self.traffic_header = header
         header_layout = QHBoxLayout(header)
         self.traffic_header_layout = header_layout
-        header_layout.setContentsMargins(10, 8, 10, 8)
+        header_layout.setContentsMargins(0, 0, 0, 0)
         self.traffic_title_container = QWidget()
         title_box = QVBoxLayout(self.traffic_title_container)
-        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setContentsMargins(10, 10, 10, 10)
         title_box.setSpacing(2)
-        title = QLabel("EUROSCOPE TRAFFIC\nSTACK")
+        title = QLabel("EUROSCOPE TRAFFIC EDITOR")
         title.setObjectName("DockTitle")
         self.sector_status.setObjectName("SectorStatus")
         title_box.addWidget(title)
@@ -1499,8 +1683,8 @@ class MainWindow(QMainWindow):
         self.collapse_button.setObjectName("CollapseButton")
         self.collapse_button.setFixedSize(28, 28)
         self.collapse_button.clicked.connect(self.toggle_left_sidebar)
-        header_layout.addWidget(self.traffic_title_container)
-        header_layout.addStretch(1)
+        self.traffic_title_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        header_layout.addWidget(self.traffic_title_container, 1)
         header_layout.addWidget(self.collapse_button)
         layout.addWidget(header)
 
@@ -1571,6 +1755,7 @@ class MainWindow(QMainWindow):
         self.canvas.map_clicked.connect(self._place_new_aircraft)
         self.canvas.cursor_geo_changed.connect(self._cursor_changed)
         self.canvas.range_changed.connect(self._range_changed)
+        self.canvas.diagram_visibility_changed.connect(self._save_diagram_visibility)
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence.Delete, self, self.delete_selected_aircraft)
@@ -1589,7 +1774,7 @@ class MainWindow(QMainWindow):
         self.sector_points = load_sector_points(path)
         self.sector_lines = load_sector_lines(path, max_lines=8000, balanced=True)
         self.sector_path = path
-        self.canvas.hidden_diagram_labels = {"SID": set(), "STAR": set(), "GEO": set()}
+        self.canvas.hidden_diagram_labels = self._load_diagram_visibility(path)
         if self.diagram_dialog is not None:
             self.diagram_dialog.close()
         self.sector_status.setText(f"SCT: {path.name}")
@@ -1748,8 +1933,8 @@ class MainWindow(QMainWindow):
         ew = "E" if longitude >= 0 else "W"
         self.cursor_label.setText(f"CTM05 CEILING:NFL195  {abs(latitude):06.3f}{ns} {abs(longitude):07.3f}{ew}")
 
-    def _range_changed(self, range_nm: int) -> None:
-        self.range_label.setText(f"{range_nm} NM")
+    def _range_changed(self, range_nm: float) -> None:
+        self.range_label.setText(f"{_format_nm(range_nm)} NM")
 
     def _timeline_changed(self, seconds: int) -> None:
         hours = seconds // 3600

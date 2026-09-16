@@ -11,14 +11,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_main_window_loads_sample_and_updates_selected_aircraft() -> None:
+def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkeypatch) -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("ASE_EDITOR_SETTINGS_PATH", str(tmp_path / "settings.ini"))
 
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
-    from ase_editor.ui import AircraftEditorDialog, MainWindow
+    from ase_editor.ui import AircraftEditorDialog, MainWindow, RANGE_PRESETS_NM
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -28,7 +29,7 @@ def test_main_window_loads_sample_and_updates_selected_aircraft() -> None:
     assert len(window.strip_rows) == 14
     assert not hasattr(window, "target_dock")
     assert window.canvas.icons
-    assert window.canvas.range_nm in {10, 20, 40, 80, 120}
+    assert window.canvas.range_nm in RANGE_PRESETS_NM
     assert window.scenario.aircraft[0].target_kind == "vehicle"
     assert not hasattr(window, "load_sector_button")
     assert not hasattr(window, "spawn_aircraft_button")
@@ -92,7 +93,6 @@ def test_main_window_loads_sample_and_updates_selected_aircraft() -> None:
     assert editor.latitude.minimumHeight() >= 30
     editor.callsign.setText("TST123")
     editor._save()
-
     assert aircraft.callsign == "TST123"
     assert any("TST123" in row.property("searchText") for row in window.strip_rows)
     assert window.canvas.selected is aircraft
@@ -103,4 +103,41 @@ def test_main_window_loads_sample_and_updates_selected_aircraft() -> None:
         dialog.close()
 
     window.close()
+    app.processEvents()
+
+
+def test_view_and_geo_diagram_visibility_persist_between_windows(tmp_path, monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("ASE_EDITOR_SETTINGS_PATH", str(tmp_path / "settings.ini"))
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from ase_editor.ui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.view_layer_actions["Geography"].setChecked(False)
+    assert not window.canvas.view_layers["Geography"]
+
+    window.open_diagrams_dialog()
+    assert window.diagram_dialog is not None
+    geo_list = window.diagram_dialog.lists["GEO"]
+    if geo_list.count() == 0 or not geo_list.item(0).flags() & Qt.ItemFlag.ItemIsUserCheckable:
+        pytest.skip("Sample sector has no GEO diagram labels")
+    window.diagram_dialog.show_all_checks["GEO"].setChecked(False)
+    hidden_geo = set(window.canvas.hidden_diagram_labels["GEO"])
+    assert hidden_geo
+    window.close()
+
+    restored = MainWindow()
+    assert not restored.view_layer_actions["Geography"].isChecked()
+    assert not restored.canvas.view_layers["Geography"]
+    assert restored.canvas.hidden_diagram_labels["GEO"] == hidden_geo
+
+    restored.open_diagrams_dialog()
+    assert restored.diagram_dialog is not None
+    assert not restored.diagram_dialog.show_all_checks["GEO"].isChecked()
+    restored.close()
     app.processEvents()
