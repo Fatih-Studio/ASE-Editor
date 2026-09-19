@@ -24,20 +24,38 @@ def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkey
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
 
-    assert [action.text() for action in window.menuBar().actions()] == ["Menu", "View", "Help"]
+    assert [action.text() for action in window.menuBar().actions()] == ["Menu", "View", "Theme", "Help"]
     assert len(window.scenario.aircraft) == 14
     assert len(window.strip_rows) == 14
     assert not hasattr(window, "target_dock")
     assert window.canvas.icons
     assert window.canvas.range_nm in RANGE_PRESETS_NM
     assert window.scenario.aircraft[0].target_kind == "vehicle"
+    assert set(window.strip_category_rows) == {"Ground Vehicle", "Aircraft"}
+    assert window.strip_category_rows["Ground Vehicle"][0].label.text().startswith("GROUND VEHICLE")
+    assert window.strip_category_rows["Aircraft"][0].label.text().startswith("AIRCRAFT")
+    window._toggle_strip_category("Ground Vehicle")
+    assert window.strip_category_rows["Ground Vehicle"][0].collapsed
+    assert all(row.isHidden() for row in window.strip_category_rows["Ground Vehicle"][1])
+    window._toggle_strip_category("Ground Vehicle")
     assert not hasattr(window, "load_sector_button")
     assert not hasattr(window, "spawn_aircraft_button")
-    assert window.load_sector_action.text() == "Load Sector Files (.sct)"
+    assert not hasattr(window, "load_sector_action")
+    assert window.load_database_menu.title() == "Load Database"
+    assert window.load_database_actions["Indonesia"].text() == "Indonesia"
     assert window.load_scenario_action.text() == "Load Scenario (.txt)"
     menu_actions = [action.text() for action in window.menuBar().actions()[0].menu().actions()]
+    assert "Load Database" in menu_actions
+    assert "Load Sector Files (.sct)" not in menu_actions
     assert "Spawn Aircraft" not in menu_actions
     assert "New Aircraft" not in menu_actions
+    theme_menu = window.menuBar().actions()[2].menu()
+    assert theme_menu is not None
+    assert [action.text() for action in theme_menu.actions()] == ["Presets", "Edit Colors..."]
+    preset_menu = theme_menu.actions()[0].menu()
+    assert preset_menu is not None
+    assert "vACC Indonesia" in [action.text() for action in preset_menu.actions()]
+    assert "UK 2026/09" in [action.text() for action in preset_menu.actions()]
     assert [action.text() for action in window.scenario_toolbar.actions()] == ["New Aircraft", "ILS Threshold"]
     assert window.scenario_toolbar.iconSize().width() == 12
     assert window.scenario_toolbar.iconSize().height() == 12
@@ -60,7 +78,13 @@ def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkey
     assert "Mouse Location" not in [action.text() for action in view_menu.actions()]
     assert "Geography" in window.view_layer_actions
     assert "Diagrams" not in window.view_layer_actions
+    assert window.info_sector_action.text() == "Info Sector"
     assert window.diagrams_action.text() == "Diagrams"
+    window.open_info_sector_dialog()
+    assert window.info_sector_dialog is not None
+    assert window.info_sector_dialog.field_edits["name"].text() == "ATC Simulator Indonesia v1.0"
+    assert window.info_sector_dialog.field_edits["wx_station"].text() == "WIII"
+    window.info_sector_dialog.close()
     window.view_layer_actions["Fixes"].setChecked(False)
     assert not window.canvas.view_layers["Fixes"]
     window.view_layer_actions["Fixes"].setChecked(True)
@@ -72,9 +96,9 @@ def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkey
     first_sid.setCheckState(Qt.Unchecked)
     assert first_sid.text() in window.canvas.hidden_diagram_labels["SID"]
     window.diagram_dialog.close()
-    window.load_sector(Path("WIII_Demo.sct"))
-    assert window.sector_path and window.sector_path.name == "WIII_Demo.sct"
-    assert "WIII_Demo.sct" in window.sector_status.text()
+    window.load_database("Indonesia")
+    assert window.sector_path and window.sector_path.name == "indonesia.sqlite3"
+    assert "DB: Indonesia" in window.sector_status.text()
     assert window.sector_points
     assert window.sector_lines
     assert window.traffic_dock.width() == 320
@@ -85,6 +109,8 @@ def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkey
 
     aircraft = window.scenario.aircraft[2]
     window.select_aircraft(aircraft)
+    assert window.canvas.center_lat == pytest.approx(aircraft.latitude)
+    assert window.canvas.center_lon == pytest.approx(aircraft.longitude)
     editor = AircraftEditorDialog(aircraft, window)
     editor.aircraft_saved.connect(window._aircraft_changed)
     editor.resize(655, 623)
@@ -129,12 +155,18 @@ def test_view_and_geo_diagram_visibility_persist_between_windows(tmp_path, monke
     window.diagram_dialog.show_all_checks["GEO"].setChecked(False)
     hidden_geo = set(window.canvas.hidden_diagram_labels["GEO"])
     assert hidden_geo
+    window.canvas.center_lat = -7.25
+    window.canvas.center_lon = 107.5
+    window.canvas.set_range_nm(0.5)
     window.close()
 
     restored = MainWindow()
     assert not restored.view_layer_actions["Geography"].isChecked()
     assert not restored.canvas.view_layers["Geography"]
     assert restored.canvas.hidden_diagram_labels["GEO"] == hidden_geo
+    assert restored.canvas.center_lat == pytest.approx(-7.25)
+    assert restored.canvas.center_lon == pytest.approx(107.5)
+    assert restored.canvas.range_nm == 0.5
 
     restored.open_diagrams_dialog()
     assert restored.diagram_dialog is not None

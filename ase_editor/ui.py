@@ -8,7 +8,7 @@ import math
 import re
 import sys
 
-from PySide6.QtCore import QPoint, QPointF, QRegularExpression, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRegularExpression, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -17,14 +17,17 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPen,
+    QPolygonF,
     QPixmap,
     QRegularExpressionValidator,
     QShortcut,
     QTransform,
+    QFontDatabase,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -47,25 +51,38 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
+from . import __version__
 from .models import Aircraft, FlightPlan, Scenario
 from .parser import parse_scenario_file
 from .sector import (
+    SectorColor,
+    SectorInfo,
+    SectorRegion,
     SectorLine,
     SectorPoint,
-    load_sector_lines,
-    load_sector_points,
+    SectorTextLabel,
+    parse_sector_info_lines,
     resolve_route_tokens,
+)
+from .sector_database import load_sector_database, save_sector_info
+from .theme import (
+    ThemePreset,
+    UK_2026_09_INDONESIA_THEME,
+    VACCC_INDONESIA_PRESET_NAME,
+    preset_from_sector_colors,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_SCENARIO = ROOT / "WIHH_example.txt"
-DEFAULT_SECTOR = ROOT / "WIII_Demo.sct"
+SECTOR_DATABASES = {"Indonesia": ROOT / "data" / "sector" / "indonesia.sqlite3"}
 ASSET_DIR = ROOT / "asset"
 RANGE_PRESETS_NM = (0.1, 0.5, 1, 2, 5, 10)
 METERS_PER_NM = 1852.0
@@ -73,11 +90,63 @@ SETTINGS_ORGANIZATION = "ASEEditor"
 SETTINGS_APPLICATION = "EuroScopeScenarioStudio"
 SETTINGS_PATH_ENV = "ASE_EDITOR_SETTINGS_PATH"
 DIAGRAM_SOURCES = ("SID", "STAR", "GEO")
+MOVEMENT_SURFACE_COLORS = {
+    "COLOR_APP",
+    "COLOR_Taxiway",
+}
+MOVEMENT_SURFACE_SOURCES = {"SID", "STAR"}
+MOVEMENT_SURFACE_LABEL_TOKENS = ("TAXIWAY",)
+MOVEMENT_SURFACE_EXCLUDED_LABEL_TOKENS = ("APRON", "BORDER", "HARD", "PARKPOS", "STAND")
 DEFAULT_AIRCRAFT_LENGTH_METERS = 39.5
 DEFAULT_VEHICLE_LENGTH_METERS = 6.0
 MIN_AIRCRAFT_ICON_PIXELS = 30.0
 MIN_VEHICLE_ICON_PIXELS = 40.0
 MAX_TARGET_ICON_PIXELS = 160.0
+MAX_VELOCITY_LEADER_PIXELS = 140.0
+RADAR_FONT_FILE = ASSET_DIR / "windows_command_prompt.ttf"
+RADAR_FONT_FAMILY = "Consolas"
+RADAR_TEXT_ENABLED = False
+FIX_LABELS_ENABLED = True
+_RADAR_FONT_LOAD_ATTEMPTED = False
+RADAR_GLYPHS = {
+    "0": ("111", "101", "101", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "010", "010", "111"),
+    "2": ("111", "001", "001", "111", "100", "100", "111"),
+    "3": ("111", "001", "001", "111", "001", "001", "111"),
+    "4": ("101", "101", "101", "111", "001", "001", "001"),
+    "5": ("111", "100", "100", "111", "001", "001", "111"),
+    "6": ("111", "100", "100", "111", "101", "101", "111"),
+    "7": ("111", "001", "001", "010", "010", "010", "010"),
+    "8": ("111", "101", "101", "111", "101", "101", "111"),
+    "9": ("111", "101", "101", "111", "001", "001", "111"),
+    "A": ("010", "101", "101", "111", "101", "101", "101"),
+    "B": ("110", "101", "101", "110", "101", "101", "110"),
+    "C": ("111", "100", "100", "100", "100", "100", "111"),
+    "D": ("110", "101", "101", "101", "101", "101", "110"),
+    "E": ("111", "100", "100", "111", "100", "100", "111"),
+    "F": ("111", "100", "100", "111", "100", "100", "100"),
+    "G": ("111", "100", "100", "101", "101", "101", "111"),
+    "H": ("101", "101", "101", "111", "101", "101", "101"),
+    "I": ("111", "010", "010", "010", "010", "010", "111"),
+    "J": ("001", "001", "001", "001", "101", "101", "111"),
+    "K": ("101", "101", "110", "100", "110", "101", "101"),
+    "L": ("100", "100", "100", "100", "100", "100", "111"),
+    "M": ("101", "111", "111", "101", "101", "101", "101"),
+    "N": ("101", "111", "111", "111", "101", "101", "101"),
+    "O": ("111", "101", "101", "101", "101", "101", "111"),
+    "P": ("111", "101", "101", "111", "100", "100", "100"),
+    "Q": ("111", "101", "101", "101", "111", "001", "001"),
+    "R": ("111", "101", "101", "111", "110", "101", "101"),
+    "S": ("111", "100", "100", "111", "001", "001", "111"),
+    "T": ("111", "010", "010", "010", "010", "010", "010"),
+    "U": ("101", "101", "101", "101", "101", "101", "111"),
+    "V": ("101", "101", "101", "101", "101", "101", "010"),
+    "W": ("101", "101", "101", "101", "111", "111", "101"),
+    "X": ("101", "101", "101", "010", "101", "101", "101"),
+    "Y": ("101", "101", "101", "010", "010", "010", "010"),
+    "Z": ("111", "001", "001", "010", "100", "100", "111"),
+    "-": ("000", "000", "000", "111", "000", "000", "000"),
+}
 AIRCRAFT_LENGTH_METERS = {
     "A318": 31.4,
     "A319": 33.8,
@@ -166,6 +235,81 @@ POINT_SOURCE_LAYERS = {
     "VOR": "VORs",
     "AIRPORT": "Airports",
 }
+SECTOR_GRID_CELL_DEGREES = 0.25
+
+
+class _SpatialIndex:
+    def __init__(self, cell_size: float = SECTOR_GRID_CELL_DEGREES) -> None:
+        self.cell_size = cell_size
+        self.cells: dict[tuple[int, int], list[object]] = {}
+
+    @classmethod
+    def from_lines(cls, lines: list[SectorLine]) -> _SpatialIndex:
+        index = cls()
+        for line in lines:
+            index.add(
+                line,
+                line.min_latitude,
+                line.max_latitude,
+                line.min_longitude,
+                line.max_longitude,
+            )
+        return index
+
+    @classmethod
+    def from_regions(cls, regions: list[SectorRegion]) -> _SpatialIndex:
+        index = cls()
+        for region in regions:
+            index.add(
+                region,
+                region.min_latitude,
+                region.max_latitude,
+                region.min_longitude,
+                region.max_longitude,
+            )
+        return index
+
+    @classmethod
+    def from_points(cls, points: list[SectorPoint]) -> _SpatialIndex:
+        index = cls()
+        for point in points:
+            index.add(point, point.latitude, point.latitude, point.longitude, point.longitude)
+        return index
+
+    @classmethod
+    def from_labels(cls, labels: list[SectorTextLabel]) -> _SpatialIndex:
+        index = cls()
+        for label in labels:
+            index.add(label, label.latitude, label.latitude, label.longitude, label.longitude)
+        return index
+
+    def add(self, item: object, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> None:
+        min_lat_cell, min_lon_cell = self._cell_for(min_lat, min_lon)
+        max_lat_cell, max_lon_cell = self._cell_for(max_lat, max_lon)
+        for lat_cell in range(min_lat_cell, max_lat_cell + 1):
+            for lon_cell in range(min_lon_cell, max_lon_cell + 1):
+                self.cells.setdefault((lat_cell, lon_cell), []).append(item)
+
+    def query(self, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> list[object]:
+        min_lat_cell, min_lon_cell = self._cell_for(min_lat, min_lon)
+        max_lat_cell, max_lon_cell = self._cell_for(max_lat, max_lon)
+        result: list[object] = []
+        seen: set[int] = set()
+        for lat_cell in range(min_lat_cell, max_lat_cell + 1):
+            for lon_cell in range(min_lon_cell, max_lon_cell + 1):
+                for item in self.cells.get((lat_cell, lon_cell), []):
+                    item_id = id(item)
+                    if item_id in seen:
+                        continue
+                    seen.add(item_id)
+                    result.append(item)
+        return result
+
+    def _cell_for(self, latitude: float, longitude: float) -> tuple[int, int]:
+        return (
+            math.floor(latitude / self.cell_size),
+            math.floor(longitude / self.cell_size),
+        )
 
 
 def _app_settings() -> QSettings:
@@ -200,14 +344,59 @@ def _format_nm(value: float) -> str:
     return f"{value:g}"
 
 
+def _sector_color_to_qcolor(color: SectorColor) -> QColor:
+    return QColor(color.red, color.green, color.blue)
+
+
+def _qcolor_to_sector_value(color: QColor) -> int:
+    return (color.blue() * 65536) + (color.green() * 256) + color.red()
+
+
+def _sector_color_hex(color: SectorColor) -> str:
+    return _sector_color_to_qcolor(color).name().upper()
+
+
+def _setting_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nearest_range_preset(range_nm: float) -> float:
+    clamped = max(RANGE_PRESETS_NM[0], min(RANGE_PRESETS_NM[-1], range_nm))
+    return min(RANGE_PRESETS_NM, key=lambda preset: abs(preset - clamped))
+
+
 def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("EuroScope Scenario Studio")
+    app.setApplicationVersion(__version__)
     app.setStyleSheet(APP_STYLESHEET)
+    _load_radar_font()
     window = MainWindow()
     window.resize(1440, 900)
     window.show()
     return app.exec()
+
+
+def _load_radar_font() -> None:
+    global RADAR_FONT_FAMILY, RADAR_TEXT_ENABLED, _RADAR_FONT_LOAD_ATTEMPTED
+    if _RADAR_FONT_LOAD_ATTEMPTED:
+        return
+    _RADAR_FONT_LOAD_ATTEMPTED = True
+    if not RADAR_FONT_FILE.exists():
+        return
+    font_id = QFontDatabase.addApplicationFont(str(RADAR_FONT_FILE))
+    if font_id < 0:
+        return
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    if not families:
+        return
+    RADAR_FONT_FAMILY = families[0]
+    RADAR_TEXT_ENABLED = True
 
 
 class ClickableFrame(QFrame):
@@ -225,6 +414,39 @@ class ClickableFrame(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
+class StripCategoryHeader(QFrame):
+    toggled = Signal(str)
+
+    def __init__(self, title: str, count: int) -> None:
+        super().__init__()
+        self.title = title
+        self.count = count
+        self.collapsed = False
+        self.setObjectName("StripCategoryHeader")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 5)
+        layout.setSpacing(6)
+        self.arrow = QLabel()
+        self.arrow.setObjectName("StripCategoryArrow")
+        self.label = QLabel()
+        self.label.setObjectName("StripCategoryText")
+        layout.addWidget(self.arrow)
+        layout.addWidget(self.label)
+        layout.addStretch(1)
+        self.set_collapsed(False)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
+        self.arrow.setText(">" if collapsed else "v")
+        self.label.setText(f"{self.title.upper()}  {self.count}")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.toggled.emit(self.title)
+        super().mousePressEvent(event)
+
+
 class RadarCanvas(QWidget):
     aircraft_selected = Signal(object)
     aircraft_double_clicked = Signal(object)
@@ -233,6 +455,7 @@ class RadarCanvas(QWidget):
     cursor_geo_changed = Signal(float, float)
     range_changed = Signal(float)
     diagram_visibility_changed = Signal()
+    view_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -243,6 +466,16 @@ class RadarCanvas(QWidget):
         self.scenario = Scenario()
         self.sector_points: dict[str, SectorPoint] = {}
         self.sector_lines: list[SectorLine] = []
+        self.sector_regions: list[SectorRegion] = []
+        self.sector_labels: list[SectorTextLabel] = []
+        self.sector_colors: dict[str, SectorColor] = {}
+        self._line_index = _SpatialIndex()
+        self._region_index = _SpatialIndex()
+        self._point_index = _SpatialIndex()
+        self._label_index = _SpatialIndex()
+        self._line_pen_cache: dict[tuple[str, str], QPen] = {}
+        self._region_brush_cache: dict[str, QColor] = {}
+        self._label_pen_cache: dict[str, QColor] = {}
         self.selected: Aircraft | None = None
         self.show_routes = True
         self.show_sector_lines = True
@@ -256,6 +489,8 @@ class RadarCanvas(QWidget):
         self.center_lon = 106.8
         self._last_mouse: QPoint | None = None
         self._panning = False
+        self._pending_drag_aircraft: Aircraft | None = None
+        self._drag_start_pos: QPoint | None = None
         self._dragging_aircraft: Aircraft | None = None
         self.aircraft_placement_mode = False
         self.icons = self._load_icons()
@@ -265,13 +500,33 @@ class RadarCanvas(QWidget):
         scenario: Scenario,
         sector_points: dict[str, SectorPoint],
         sector_lines: list[SectorLine],
+        sector_regions: list[SectorRegion] | None = None,
+        sector_labels: list[SectorTextLabel] | None = None,
+        sector_colors: dict[str, SectorColor] | None = None,
         selected: Aircraft | None = None,
     ) -> None:
         self.scenario = scenario
         self.sector_points = sector_points
         self.sector_lines = sector_lines
+        self.sector_regions = sector_regions or []
+        self.sector_labels = sector_labels or []
+        self.sector_colors = sector_colors or {}
+        self._line_index = _SpatialIndex.from_lines(self.sector_lines)
+        self._region_index = _SpatialIndex.from_regions(self.sector_regions)
+        self._point_index = _SpatialIndex.from_points(list(self.sector_points.values()))
+        self._label_index = _SpatialIndex.from_labels(self.sector_labels)
+        self._line_pen_cache.clear()
+        self._region_brush_cache.clear()
+        self._label_pen_cache.clear()
         self.selected = selected
         self.fit_to_data()
+
+    def set_sector_colors(self, sector_colors: dict[str, SectorColor]) -> None:
+        self.sector_colors = sector_colors
+        self._line_pen_cache.clear()
+        self._region_brush_cache.clear()
+        self._label_pen_cache.clear()
+        self.update()
 
     def set_selected(self, aircraft: Aircraft | None) -> None:
         self.selected = aircraft
@@ -320,9 +575,10 @@ class RadarCanvas(QWidget):
         self.update()
 
     def set_range_nm(self, range_nm: float) -> None:
-        self.range_nm = max(RANGE_PRESETS_NM[0], min(RANGE_PRESETS_NM[-1], range_nm))
+        self.range_nm = _nearest_range_preset(range_nm)
         self._sync_scale_to_range()
         self.range_changed.emit(self.range_nm)
+        self.view_changed.emit()
         self.update()
 
     def set_vector_minutes(self, minutes: int) -> None:
@@ -351,6 +607,7 @@ class RadarCanvas(QWidget):
                 self.range_nm = RANGE_PRESETS_NM[-1]
         self._sync_scale_to_range()
         self.range_changed.emit(self.range_nm)
+        self.view_changed.emit()
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -359,11 +616,17 @@ class RadarCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#010f1f"))
         self._sync_scale_to_range()
         self._draw_scope_background(painter)
-        self._draw_sector_lines(painter)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        self._draw_regions(painter)
         self._draw_fixes(painter)
+        painter.setRenderHint(QPainter.Antialiasing, True)
         self._draw_thresholds(painter)
         self._draw_holds(painter)
         self._draw_routes(painter)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        self._draw_sector_lines(painter)
+        self._draw_sector_labels(painter)
+        painter.setRenderHint(QPainter.Antialiasing, True)
         self._draw_targets(painter)
         self._draw_scope_overlay(painter)
 
@@ -389,6 +652,7 @@ class RadarCanvas(QWidget):
         self.center_lon = cursor_lon - x_nm / (60.0 * cos_lat)
 
         self.range_changed.emit(self.range_nm)
+        self.view_changed.emit()
         self.update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -406,7 +670,8 @@ class RadarCanvas(QWidget):
             self.selected = aircraft
             self.aircraft_selected.emit(aircraft)
             if aircraft:
-                self._dragging_aircraft = aircraft
+                self._pending_drag_aircraft = aircraft
+                self._drag_start_pos = event.position().toPoint()
             self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -426,16 +691,30 @@ class RadarCanvas(QWidget):
             self.update()
             return
 
+        if self._pending_drag_aircraft is not None and self._drag_start_pos is not None:
+            drag_distance = (current_pos - self._drag_start_pos).manhattanLength()
+            if drag_distance >= QApplication.startDragDistance():
+                self._dragging_aircraft = self._pending_drag_aircraft
+                self._pending_drag_aircraft = None
+
         if self._dragging_aircraft:
+            lat, lon, snapped_heading = self._snap_to_movement_surface(lat, lon, self._dragging_aircraft)
             self._dragging_aircraft.latitude = lat
             self._dragging_aircraft.longitude = lon
+            if snapped_heading is not None:
+                self._dragging_aircraft.heading_raw = snapped_heading
             self.aircraft_moved.emit(self._dragging_aircraft)
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        was_panning = self._panning
         if event.button() == Qt.RightButton:
             self._panning = False
+            if was_panning:
+                self.view_changed.emit()
         if event.button() == Qt.LeftButton:
+            self._pending_drag_aircraft = None
+            self._drag_start_pos = None
             self._dragging_aircraft = None
         self._last_mouse = None
 
@@ -453,6 +732,7 @@ class RadarCanvas(QWidget):
             lat, lon = self.screen_to_geo(event.position())
             self.center_lat = lat
             self.center_lon = lon
+            self.view_changed.emit()
             self.update()
 
     def geo_to_screen(self, latitude: float, longitude: float) -> QPointF:
@@ -481,59 +761,99 @@ class RadarCanvas(QWidget):
         self.pixels_per_nm = max(2.5, min(self.width(), self.height()) * 0.88 / (self.range_nm * 2.0))
 
     def _draw_scope_background(self, painter: QPainter) -> None:
-        center = QPointF(self.width() / 2.0, self.height() / 2.0)
-        radius = self.range_nm * self.pixels_per_nm
-        painter.setPen(QPen(QColor(56, 189, 248, 22), 1))
-
-        grid_step_nm = self._grid_step_nm()
-        value = -self.range_nm
-        while value <= self.range_nm:
-            x = center.x() + value * self.pixels_per_nm
-            y = center.y() + value * self.pixels_per_nm
-            painter.drawLine(int(x), 0, int(x), self.height())
-            painter.drawLine(0, int(y), self.width(), int(y))
-            value += grid_step_nm
-
-        painter.setPen(QColor("#4cd7f6"))
-        painter.drawText(14, 22, f"SCOPE: WIHH  RANGE {_format_nm(self.range_nm)} NM")
-        painter.setPen(QColor("#bcc9cd"))
-        painter.drawText(14, 38, f"CENTER {self.center_lat:.4f} {self.center_lon:.4f}")
+        if RADAR_TEXT_ENABLED:
+            painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
+            painter.setPen(QColor("#4cd7f6"))
+            painter.drawText(14, 22, f"SCOPE: WIHH  RANGE {_format_nm(self.range_nm)} NM")
+            painter.setPen(QColor("#bcc9cd"))
+            painter.drawText(14, 38, f"CENTER {self.center_lat:.4f} {self.center_lon:.4f}")
 
     def _draw_sector_lines(self, painter: QPainter) -> None:
         if not self.show_sector_lines:
             return
-        colors = {
-            "RUNWAY": QColor(212, 228, 250, 120),
-            "SID": QColor(6, 182, 212, 66),
-            "STAR": QColor(255, 185, 95, 70),
-            "HIGH AIRWAY": QColor(6, 182, 212, 60),
-            "LOW AIRWAY": QColor(6, 182, 212, 45),
-            "ARTCC": QColor(78, 222, 163, 55),
-            "ARTCC HIGH": QColor(78, 222, 163, 55),
-            "ARTCC LOW": QColor(78, 222, 163, 45),
-            "GEO": QColor(100, 116, 139, 65),
-            "REGIONS": QColor(148, 163, 184, 55),
-            "LABELS": QColor(188, 201, 205, 55),
-            "DIAGRAMS": QColor(255, 185, 95, 60),
-        }
-        for line in self.sector_lines:
+        lat_min, lat_max, lon_min, lon_max = self._visible_geo_bounds(1.5)
+        batches: dict[tuple[str, str], list[QLineF]] = {}
+        batch_samples: dict[tuple[str, str], SectorLine] = {}
+        half_width = self.width() / 2.0
+        half_height = self.height() / 2.0
+        cos_lat = max(0.15, math.cos(math.radians(self.center_lat)))
+        x_scale = 60.0 * cos_lat * self.pixels_per_nm
+        y_scale = 60.0 * self.pixels_per_nm
+        margin = 180.0
+        min_x = -margin
+        max_x = self.width() + margin
+        min_y = -margin
+        max_y = self.height() + margin
+        for item in self._line_index.query(lat_min, lat_max, lon_min, lon_max):
+            if not isinstance(item, SectorLine):
+                continue
+            line = item
+            if not self._line_lod_visible(line):
+                continue
             if not self._line_source_visible(line.source):
                 continue
             if not self._line_label_visible(line):
                 continue
-            start = self.geo_to_screen(line.latitude1, line.longitude1)
-            end = self.geo_to_screen(line.latitude2, line.longitude2)
-            if not self._point_near_view(start) and not self._point_near_view(end):
+            if not self._line_intersects_bounds(line, lat_min, lat_max, lon_min, lon_max):
                 continue
-            painter.setPen(QPen(colors.get(line.source, QColor("#475569")), 1))
-            painter.drawLine(start, end)
+            x1 = half_width + (line.longitude1 - self.center_lon) * x_scale
+            y1 = half_height - (line.latitude1 - self.center_lat) * y_scale
+            x2 = half_width + (line.longitude2 - self.center_lon) * x_scale
+            y2 = half_height - (line.latitude2 - self.center_lat) * y_scale
+            if not self._screen_line_intersects_rect(x1, y1, x2, y2, min_x, max_x, min_y, max_y):
+                continue
+            key = (line.source, line.color_name)
+            batches.setdefault(key, []).append(QLineF(x1, y1, x2, y2))
+            batch_samples.setdefault(key, line)
+
+        for key, lines in batches.items():
+            painter.setPen(self._sector_line_pen(batch_samples[key]))
+            painter.drawLines(lines)
+
+    def _draw_regions(self, painter: QPainter) -> None:
+        if not self.show_sector_lines or not self.view_layers.get("Regions", True):
+            return
+        lat_min, lat_max, lon_min, lon_max = self._visible_geo_bounds(0.5)
+        painter.setPen(Qt.NoPen)
+        for item in self._region_index.query(lat_min, lat_max, lon_min, lon_max):
+            if not isinstance(item, SectorRegion):
+                continue
+            region = item
+            if not self._region_intersects_bounds(region, lat_min, lat_max, lon_min, lon_max):
+                continue
+            points = [
+                self.geo_to_screen(latitude, longitude)
+                for latitude, longitude in region.points
+            ]
+            painter.setBrush(self._sector_region_color(region))
+            painter.drawPolygon(QPolygonF(points))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _draw_sector_labels(self, painter: QPainter) -> None:
+        if not RADAR_TEXT_ENABLED or not self.show_sector_lines or not self.view_layers.get("Static Text", True):
+            return
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
+        lat_min, lat_max, lon_min, lon_max = self._visible_geo_bounds(1.0)
+        for item in self._label_index.query(lat_min, lat_max, lon_min, lon_max):
+            if not isinstance(item, SectorTextLabel):
+                continue
+            label = item
+            screen = self.geo_to_screen(label.latitude, label.longitude)
+            if not self._point_near_view(screen):
+                continue
+            painter.setPen(self._sector_label_color(label))
+            painter.drawText(screen, label.text[:48])
 
     def _draw_fixes(self, painter: QPainter) -> None:
         if not self.show_fixes or self.range_nm > 80:
             return
-        painter.setFont(QFont("JetBrains Mono", 7))
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 7))
         count = 0
-        for point in self.sector_points.values():
+        lat_min, lat_max, lon_min, lon_max = self._visible_geo_bounds(1.0)
+        for item in self._point_index.query(lat_min, lat_max, lon_min, lon_max):
+            if not isinstance(item, SectorPoint):
+                continue
+            point = item
             point_layer = POINT_SOURCE_LAYERS.get(point.source)
             if point_layer and not self.view_layers.get(point_layer, True):
                 continue
@@ -542,7 +862,7 @@ class RadarCanvas(QWidget):
                 continue
             painter.setPen(QPen(QColor(78, 222, 163, 120), 1))
             if point.source == "VOR":
-                painter.drawRect(int(screen.x() - 3), int(screen.y() - 3), 6, 6)
+                painter.drawEllipse(screen, 3, 3)
             else:
                 points = [
                     QPointF(screen.x(), screen.y() - 4),
@@ -550,8 +870,17 @@ class RadarCanvas(QWidget):
                     QPointF(screen.x() - 4, screen.y() + 3),
                 ]
                 painter.drawPolygon(points)
-            painter.setPen(QColor(188, 201, 205, 140))
-            painter.drawText(screen + QPointF(6, -4), point.identifier)
+            if FIX_LABELS_ENABLED:
+                painter.setPen(QColor(188, 201, 205, 175))
+                if RADAR_TEXT_ENABLED:
+                    painter.drawText(screen + QPointF(7, -5), point.identifier)
+                else:
+                    self._draw_radar_glyph_text(
+                        painter,
+                        point.identifier,
+                        screen + QPointF(7, -5),
+                        QColor(188, 201, 205, 175),
+                    )
             count += 1
             if count > 350:
                 break
@@ -559,18 +888,19 @@ class RadarCanvas(QWidget):
     def _draw_thresholds(self, painter: QPainter) -> None:
         if not self.view_layers.get("Thresholds", True):
             return
-        painter.setFont(QFont("JetBrains Mono", 8, QFont.Bold))
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
         for threshold in self.scenario.thresholds:
             start = self.geo_to_screen(threshold.latitude1, threshold.longitude1)
             end = self.geo_to_screen(threshold.latitude2, threshold.longitude2)
             painter.setPen(QPen(QColor("#4cd7f6"), 2))
             painter.drawLine(start, end)
-            painter.drawText(end + QPointF(5, -5), threshold.name)
+            if RADAR_TEXT_ENABLED:
+                painter.drawText(end + QPointF(5, -5), threshold.name)
 
     def _draw_holds(self, painter: QPainter) -> None:
         if not self.view_layers.get("Holds", True):
             return
-        painter.setFont(QFont("JetBrains Mono", 8, QFont.Bold))
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
         painter.setPen(QPen(QColor("#ffb95f"), 1, Qt.DashLine))
         for hold in self.scenario.holds:
             point = self.sector_points.get(hold.fix)
@@ -580,7 +910,8 @@ class RadarCanvas(QWidget):
             if not self._point_near_view(screen):
                 continue
             painter.drawEllipse(screen, 8, 8)
-            painter.drawText(screen + QPointF(10, -8), f"HOLD {hold.fix}")
+            if RADAR_TEXT_ENABLED:
+                painter.drawText(screen + QPointF(10, -8), f"HOLD {hold.fix}")
 
     def _draw_routes(self, painter: QPainter) -> None:
         if not self.show_routes or not self.selected:
@@ -589,14 +920,15 @@ class RadarCanvas(QWidget):
         if not points:
             return
 
-        painter.setFont(QFont("JetBrains Mono", 8, QFont.Bold))
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
         painter.setPen(QPen(QColor("#4edea3"), 1, Qt.DashLine))
         previous = self.geo_to_screen(self.selected.latitude, self.selected.longitude)
         for point in points:
             current = self.geo_to_screen(point.latitude, point.longitude)
             painter.drawLine(previous, current)
             painter.drawEllipse(current, 3, 3)
-            painter.drawText(current + QPointF(6, -6), point.identifier)
+            if RADAR_TEXT_ENABLED:
+                painter.drawText(current + QPointF(6, -6), point.identifier)
             previous = current
 
     def _draw_targets(self, painter: QPainter) -> None:
@@ -605,17 +937,17 @@ class RadarCanvas(QWidget):
             if not self._point_near_view(point):
                 continue
             selected = aircraft is self.selected
-            self._draw_velocity_leader(painter, aircraft, point, selected)
             self._draw_target_icon(painter, aircraft, point, selected)
             self._draw_tag(painter, aircraft, point, selected)
 
     def _draw_velocity_leader(self, painter: QPainter, aircraft: Aircraft, point: QPointF, selected: bool) -> None:
         speed = aircraft.ground_speed or _int_text(aircraft.flight_plan.cruise_speed)
-        distance_nm = speed * self.vector_minutes / 60.0
+        distance_pixels = speed * self.vector_minutes / 60.0 * self.pixels_per_nm
+        distance_pixels = min(MAX_VELOCITY_LEADER_PIXELS, distance_pixels)
         heading_rad = math.radians(aircraft.heading_degrees - 90)
         end = QPointF(
-            point.x() + math.cos(heading_rad) * distance_nm * self.pixels_per_nm,
-            point.y() + math.sin(heading_rad) * distance_nm * self.pixels_per_nm,
+            point.x() + math.cos(heading_rad) * distance_pixels,
+            point.y() + math.sin(heading_rad) * distance_pixels,
         )
         painter.setPen(QPen(QColor("#4cd7f6") if selected else QColor(100, 116, 139, 160), 2 if selected else 1))
         painter.drawLine(point, end)
@@ -636,10 +968,36 @@ class RadarCanvas(QWidget):
             painter.setPen(QPen(QColor("#4cd7f6") if selected else QColor("#64748b"), 2))
             painter.drawEllipse(point, radius, radius)
 
+    def _draw_radar_glyph_text(self, painter: QPainter, text: str, origin: QPointF, color: QColor) -> None:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        x = int(round(origin.x()))
+        y = int(round(origin.y()))
+        pixel = 1
+        gap = 1
+        for character in text.upper()[:8]:
+            glyph = RADAR_GLYPHS.get(character)
+            if glyph is None:
+                x += 3 * (pixel + gap)
+                continue
+            for row_index, row in enumerate(glyph):
+                for column_index, value in enumerate(row):
+                    if value == "1":
+                        painter.drawRect(
+                            x + column_index * (pixel + gap),
+                            y + row_index * (pixel + gap),
+                            pixel,
+                            pixel,
+                        )
+            x += (len(glyph[0]) + 1) * (pixel + gap)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
     def _draw_tag(self, painter: QPainter, aircraft: Aircraft, point: QPointF, selected: bool) -> None:
+        if not RADAR_TEXT_ENABLED:
+            return
         icon_radius = self._target_icon_length_pixels(aircraft) / 2.0
         block_origin = point + QPointF(max(38.0, icon_radius + 14.0), -28 if selected else -22)
-        painter.setFont(QFont("JetBrains Mono", 9 if selected else 8, QFont.Bold))
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 9 if selected else 8, QFont.Bold))
         if selected:
             width = 236
             height = 58
@@ -661,7 +1019,9 @@ class RadarCanvas(QWidget):
             painter.drawText(block_origin + QPointF(0, 13), f"FL{aircraft.actual_flight_level:03d} {aircraft.display_speed or '---'}K")
 
     def _draw_scope_overlay(self, painter: QPainter) -> None:
-        painter.setFont(QFont("JetBrains Mono", 8, QFont.Bold))
+        if not RADAR_TEXT_ENABLED:
+            return
+        painter.setFont(QFont(RADAR_FONT_FAMILY, 8, QFont.Bold))
         painter.setPen(QColor("#bcc9cd"))
         painter.drawText(12, self.height() - 18, f"ACTIVE TARGETS {len(self.scenario.aircraft):02d}  VECTOR {self.vector_minutes}M")
 
@@ -684,6 +1044,32 @@ class RadarCanvas(QWidget):
             return 5
         return 10
 
+    def _screen_line_intersects_rect(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+    ) -> bool:
+        if (min_x <= x1 <= max_x and min_y <= y1 <= max_y) or (
+            min_x <= x2 <= max_x and min_y <= y2 <= max_y
+        ):
+            return True
+        if max(x1, x2) < min_x or min(x1, x2) > max_x or max(y1, y2) < min_y or min(y1, y2) > max_y:
+            return False
+        line = QLineF(x1, y1, x2, y2)
+        bounded = QLineF.IntersectionType.BoundedIntersection
+        return (
+            line.intersects(QLineF(min_x, min_y, max_x, min_y))[0] == bounded
+            or line.intersects(QLineF(max_x, min_y, max_x, max_y))[0] == bounded
+            or line.intersects(QLineF(max_x, max_y, min_x, max_y))[0] == bounded
+            or line.intersects(QLineF(min_x, max_y, min_x, min_y))[0] == bounded
+        )
+
     def _aircraft_at(self, point: QPointF) -> Aircraft | None:
         nearest: tuple[float, Aircraft] | None = None
         for aircraft in self.scenario.aircraft:
@@ -693,6 +1079,104 @@ class RadarCanvas(QWidget):
             if distance <= hit_radius and (nearest is None or distance < nearest[0]):
                 nearest = (distance, aircraft)
         return nearest[1] if nearest else None
+
+    def _snap_to_movement_surface(
+        self,
+        latitude: float,
+        longitude: float,
+        aircraft: Aircraft | None = None,
+    ) -> tuple[float, float, int | None]:
+        tolerance_nm = max(0.015, min(0.08, 10.0 / max(self.pixels_per_nm, 1.0)))
+        cos_lat = max(0.15, math.cos(math.radians(latitude)))
+        lat_margin = tolerance_nm / 60.0
+        lon_margin = tolerance_nm / (60.0 * cos_lat)
+        candidates = self._line_index.query(
+            latitude - lat_margin,
+            latitude + lat_margin,
+            longitude - lon_margin,
+            longitude + lon_margin,
+        )
+        best: tuple[float, float, float, SectorLine] | None = None
+        for item in candidates:
+            if not isinstance(item, SectorLine) or not self._is_movement_surface_line(item):
+                continue
+            snapped = self._project_geo_to_line(latitude, longitude, item, cos_lat)
+            if snapped is None:
+                continue
+            distance_nm, snapped_lat, snapped_lon = snapped
+            if distance_nm <= tolerance_nm and (best is None or distance_nm < best[0]):
+                best = (distance_nm, snapped_lat, snapped_lon, item)
+        if best is None:
+            return latitude, longitude, None
+        heading = self._snap_heading_for_line(best[3], best[1], best[2], aircraft)
+        return best[1], best[2], heading
+
+    def _project_geo_to_line(
+        self,
+        latitude: float,
+        longitude: float,
+        line: SectorLine,
+        cos_lat: float,
+    ) -> tuple[float, float, float] | None:
+        x1 = (line.longitude1 - longitude) * 60.0 * cos_lat
+        y1 = (line.latitude1 - latitude) * 60.0
+        x2 = (line.longitude2 - longitude) * 60.0 * cos_lat
+        y2 = (line.latitude2 - latitude) * 60.0
+        dx = x2 - x1
+        dy = y2 - y1
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-9:
+            return None
+        t = max(0.0, min(1.0, -(x1 * dx + y1 * dy) / length_sq))
+        snapped_x = x1 + t * dx
+        snapped_y = y1 + t * dy
+        distance_nm = math.hypot(snapped_x, snapped_y)
+        snapped_lat = latitude + snapped_y / 60.0
+        snapped_lon = longitude + snapped_x / (60.0 * cos_lat)
+        return distance_nm, snapped_lat, snapped_lon
+
+    def _snap_heading_for_line(
+        self,
+        line: SectorLine,
+        snapped_latitude: float,
+        snapped_longitude: float,
+        aircraft: Aircraft | None,
+    ) -> int:
+        heading = self._bearing_degrees(line.latitude1, line.longitude1, line.latitude2, line.longitude2)
+        reverse_heading = (heading + 180.0) % 360.0
+        if aircraft is not None:
+            movement_heading = self._bearing_degrees(
+                aircraft.latitude,
+                aircraft.longitude,
+                snapped_latitude,
+                snapped_longitude,
+            )
+            if self._heading_delta(reverse_heading, movement_heading) < self._heading_delta(heading, movement_heading):
+                heading = reverse_heading
+        rounded = int(round(heading)) % 360
+        return 360 if rounded == 0 else rounded
+
+    def _bearing_degrees(self, latitude1: float, longitude1: float, latitude2: float, longitude2: float) -> float:
+        mean_latitude = (latitude1 + latitude2) / 2.0
+        cos_lat = max(0.15, math.cos(math.radians(mean_latitude)))
+        east_nm = (longitude2 - longitude1) * 60.0 * cos_lat
+        north_nm = (latitude2 - latitude1) * 60.0
+        if abs(east_nm) <= 1e-9 and abs(north_nm) <= 1e-9:
+            return 0.0
+        return (math.degrees(math.atan2(east_nm, north_nm)) + 360.0) % 360.0
+
+    def _heading_delta(self, heading1: float, heading2: float) -> float:
+        return abs((heading1 - heading2 + 180.0) % 360.0 - 180.0)
+
+    def _is_movement_surface_line(self, line: SectorLine) -> bool:
+        if line.color_name in MOVEMENT_SURFACE_COLORS:
+            return True
+        if line.source in MOVEMENT_SURFACE_SOURCES:
+            return True
+        label = line.label.upper()
+        if any(token in label for token in MOVEMENT_SURFACE_EXCLUDED_LABEL_TOKENS):
+            return False
+        return any(token in label for token in MOVEMENT_SURFACE_LABEL_TOKENS)
 
     def _point_near_view(self, point: QPointF) -> bool:
         margin = 180
@@ -708,6 +1192,114 @@ class RadarCanvas(QWidget):
         if line.source not in self.hidden_diagram_labels or not line.label:
             return True
         return line.label not in self.hidden_diagram_labels[line.source]
+
+    def _line_lod_visible(self, line: SectorLine) -> bool:
+        return True
+
+    def _visible_geo_bounds(self, margin_nm: float = 0.0) -> tuple[float, float, float, float]:
+        margin_lat = margin_nm / 60.0
+        cos_lat = max(0.15, math.cos(math.radians(self.center_lat)))
+        margin_lon = margin_nm / (60.0 * cos_lat)
+        half_lat = self.range_nm / 60.0 + margin_lat
+        half_lon = self.range_nm / (60.0 * cos_lat) + margin_lon
+        return (
+            self.center_lat - half_lat,
+            self.center_lat + half_lat,
+            self.center_lon - half_lon,
+            self.center_lon + half_lon,
+        )
+
+    def _line_intersects_bounds(
+        self,
+        line: SectorLine,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> bool:
+        return (
+            line.max_latitude >= lat_min
+            and line.min_latitude <= lat_max
+            and line.max_longitude >= lon_min
+            and line.min_longitude <= lon_max
+        )
+
+    def _region_intersects_bounds(
+        self,
+        region: SectorRegion,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> bool:
+        return (
+            region.max_latitude >= lat_min
+            and region.min_latitude <= lat_max
+            and region.max_longitude >= lon_min
+            and region.min_longitude <= lon_max
+        )
+
+    def _sector_color(self, color_name: str, fallback: QColor, alpha: int) -> QColor:
+        sector_color = self.sector_colors.get(color_name)
+        if not sector_color:
+            color = QColor(fallback)
+        else:
+            color = QColor(sector_color.red, sector_color.green, sector_color.blue)
+        color.setAlpha(alpha)
+        return color
+
+    def _sector_line_pen(self, line: SectorLine) -> QPen:
+        key = (line.source, line.color_name)
+        pen = self._line_pen_cache.get(key)
+        if pen is None:
+            pen = QPen(self._sector_line_color(line), 1)
+            self._line_pen_cache[key] = pen
+        return pen
+
+    def _sector_line_color(self, line: SectorLine) -> QColor:
+        fallbacks = {
+            "RUNWAY": QColor(212, 228, 250),
+            "SID": QColor(6, 182, 212),
+            "STAR": QColor(255, 185, 95),
+            "HIGH AIRWAY": QColor(6, 182, 212),
+            "LOW AIRWAY": QColor(6, 182, 212),
+            "ARTCC": QColor(78, 222, 163),
+            "ARTCC HIGH": QColor(78, 222, 163),
+            "ARTCC LOW": QColor(78, 222, 163),
+            "GEO": QColor(100, 116, 139),
+            "DIAGRAMS": QColor(255, 185, 95),
+        }
+        alphas = {
+            "RUNWAY": 230,
+            "SID": 130,
+            "STAR": 135,
+            "HIGH AIRWAY": 120,
+            "LOW AIRWAY": 105,
+            "ARTCC": 115,
+            "ARTCC HIGH": 115,
+            "ARTCC LOW": 100,
+            "GEO": 155,
+            "DIAGRAMS": 130,
+        }
+        return self._sector_color(
+            line.color_name,
+            fallbacks.get(line.source, QColor("#475569")),
+            alphas.get(line.source, 65),
+        )
+
+    def _sector_region_color(self, region: SectorRegion) -> QColor:
+        color = self._region_brush_cache.get(region.color_name)
+        if color is None:
+            color = self._sector_color(region.color_name, QColor(148, 163, 184), 20)
+            self._region_brush_cache[region.color_name] = color
+        return color
+
+    def _sector_label_color(self, label: SectorTextLabel) -> QColor:
+        color = self._label_pen_cache.get(label.color_name)
+        if color is None:
+            color = self._sector_color(label.color_name, QColor(188, 201, 205), 230)
+            self._label_pen_cache[label.color_name] = color
+        return color
 
     def _load_icons(self) -> dict[str, QPixmap]:
         icons: dict[str, QPixmap] = {}
@@ -1393,19 +1985,219 @@ class DiagramDialog(QDialog):
         show_all.blockSignals(False)
 
 
+class InfoSectorDialog(QDialog):
+    info_saved = Signal(tuple)
+    FIELD_DEFINITIONS = (
+        ("name", "Name of sector", ""),
+        ("callsign", "Default callsign", ""),
+        ("wx_station", "Default WX station", ""),
+        ("center_latitude", "Center latitude", "S002.19.45.342"),
+        ("center_longitude", "Center longitude", "E115.18.14.097"),
+        ("nm_latitude", "NM per degree latitude", "60"),
+        ("nm_longitude", "NM per degree longitude", "ROUND(COS(latitude) * 60)"),
+        ("magnetic_variation", "Magnetic variation", "-0"),
+        ("scale_factor", "Scaling factor", "1"),
+    )
+
+    def __init__(self, info: SectorInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.field_edits: dict[str, QLineEdit] = {}
+        self.setWindowTitle("Info Sector")
+        self.setMinimumSize(560, 430)
+        self.resize(620, 470)
+        self._build_widgets(info)
+
+    def _build_widgets(self, info: SectorInfo) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("[INFO]")
+        title.setObjectName("DiagramColumnTitle")
+        layout.addWidget(title)
+
+        form = QGridLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        latitude_validator = QRegularExpressionValidator(
+            QRegularExpression(r"^$|^[NS]\d{2,3}\.\d{2}\.\d{2}(?:\.\d+)?$"),
+            self,
+        )
+        longitude_validator = QRegularExpressionValidator(
+            QRegularExpression(r"^$|^[EW]\d{3}\.\d{2}\.\d{2}(?:\.\d+)?$"),
+            self,
+        )
+        number_validator = QRegularExpressionValidator(
+            QRegularExpression(r"^$|^-?\d+(?:\.\d+)?$"),
+            self,
+        )
+
+        for row, (key, label_text, placeholder) in enumerate(self.FIELD_DEFINITIONS):
+            label = QLabel(label_text)
+            label.setObjectName("DialogFieldLabel")
+            edit = _dialog_line()
+            edit.setPlaceholderText(placeholder)
+            if key == "center_latitude":
+                edit.setValidator(latitude_validator)
+            elif key == "center_longitude":
+                edit.setValidator(longitude_validator)
+            elif key in {"nm_latitude", "nm_longitude", "magnetic_variation", "scale_factor"}:
+                edit.setValidator(number_validator)
+            self.field_edits[key] = edit
+            form.addWidget(label, row, 0)
+            form.addWidget(edit, row, 1)
+
+        form.setColumnStretch(1, 1)
+        layout.addLayout(form, 1)
+        self.set_info(info)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        save = QPushButton("Save")
+        save.setObjectName("DialogPrimaryButton")
+        save.clicked.connect(self._save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        footer.addWidget(save)
+        footer.addWidget(close)
+        layout.addLayout(footer)
+
+    def set_info(self, info: SectorInfo) -> None:
+        lines = list(info.raw_lines)
+        for index, (key, _label_text, _placeholder) in enumerate(self.FIELD_DEFINITIONS):
+            self.field_edits[key].setText(lines[index] if index < len(lines) else "")
+
+    def _save(self) -> None:
+        lines = [self.field_edits[key].text().strip() for key, _label, _placeholder in self.FIELD_DEFINITIONS]
+        while lines and not lines[-1]:
+            lines.pop()
+        self.info_saved.emit(tuple(lines))
+
+
+class ThemeEditorDialog(QDialog):
+    color_changed = Signal(str, int)
+
+    def __init__(self, colors: dict[str, SectorColor], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.colors = dict(colors)
+        self._syncing = False
+        self._swatches: dict[str, QPushButton] = {}
+        self._value_items: dict[str, QTableWidgetItem] = {}
+        self._hex_items: dict[str, QTableWidgetItem] = {}
+        self.setWindowTitle("Theme Colors")
+        self.setMinimumSize(640, 500)
+        self.resize(720, 560)
+        self._build_widgets()
+
+    def _build_widgets(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        self.table = QTableWidget(len(self.colors), 4)
+        self.table.setHorizontalHeaderLabels(["Name", "Value", "RGB", "Color"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
+        for row, name in enumerate(sorted(self.colors, key=str.casefold)):
+            color = self.colors[name]
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            value_item = QTableWidgetItem(str(color.value))
+            value_item.setData(Qt.ItemDataRole.UserRole, name)
+            hex_item = QTableWidgetItem(_sector_color_hex(color))
+            hex_item.setFlags(hex_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            swatch = QPushButton()
+            swatch.setObjectName("ColorSwatchButton")
+            swatch.setFixedSize(44, 22)
+            swatch.setToolTip(f"Change {name}")
+            swatch.clicked.connect(lambda _checked=False, name=name: self._pick_color(name))
+
+            self.table.setItem(row, 0, name_item)
+            self.table.setItem(row, 1, value_item)
+            self.table.setItem(row, 2, hex_item)
+            self.table.setCellWidget(row, 3, swatch)
+            self._value_items[name] = value_item
+            self._hex_items[name] = hex_item
+            self._swatches[name] = swatch
+            self._sync_row(name)
+
+        self.table.itemChanged.connect(self._item_changed)
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        footer.addWidget(close)
+        layout.addLayout(footer)
+
+    def _item_changed(self, item: QTableWidgetItem) -> None:
+        if self._syncing or item.column() != 1:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+        if not name:
+            return
+        try:
+            value = int(item.text().strip())
+        except ValueError:
+            self._sync_row(str(name))
+            return
+        if not 0 <= value <= 0xFFFFFF:
+            self._sync_row(str(name))
+            return
+        self._set_color_value(str(name), value)
+
+    def _pick_color(self, name: str) -> None:
+        current = _sector_color_to_qcolor(self.colors[name])
+        picked = QColorDialog.getColor(current, self, f"Change {name}")
+        if not picked.isValid():
+            return
+        self._set_color_value(name, _qcolor_to_sector_value(picked))
+
+    def _set_color_value(self, name: str, value: int) -> None:
+        self.colors[name] = SectorColor(name, value)
+        self._sync_row(name)
+        self.color_changed.emit(name, value)
+
+    def _sync_row(self, name: str) -> None:
+        color = self.colors[name]
+        qcolor = _sector_color_to_qcolor(color)
+        self._syncing = True
+        try:
+            self._value_items[name].setText(str(color.value))
+            self._hex_items[name].setText(qcolor.name().upper())
+            self._swatches[name].setStyleSheet(f"background: {qcolor.name()};")
+        finally:
+            self._syncing = False
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        _load_radar_font()
         self.setStyleSheet(APP_STYLESHEET)
-        self.setWindowTitle("EuroScope Scenario Studio")
+        self.setWindowTitle(f"EuroScope Scenario Studio v{__version__}")
         self.setMinimumSize(1180, 760)
 
         self.scenario = Scenario()
         self.sector_points: dict[str, SectorPoint] = {}
         self.sector_lines: list[SectorLine] = []
+        self.sector_regions: list[SectorRegion] = []
+        self.sector_labels: list[SectorTextLabel] = []
+        self.sector_colors: dict[str, SectorColor] = {}
+        self.sector_info = SectorInfo()
         self.sector_path: Path | None = None
         self.selected: Aircraft | None = None
         self.strip_rows: list[ClickableFrame] = []
+        self.strip_category_rows: dict[str, tuple[StripCategoryHeader, list[ClickableFrame]]] = {}
+        self.collapsed_strip_categories: set[str] = set()
+        self.strip_filter_query = ""
 
         self.canvas = RadarCanvas()
         self.settings = _app_settings()
@@ -1416,12 +2208,20 @@ class MainWindow(QMainWindow):
         self.stack_count = QLabel("0 ACFT")
         self.strip_count = QLabel("0 STRIPS")
         self.timeline_time = QLabel("00:00:00")
-        self.sector_status = QLabel("NO SCT")
+        self.sector_status = QLabel("NO DATABASE")
         self.editor_dialogs: list[AircraftEditorDialog] = []
         self.diagram_dialog: DiagramDialog | None = None
+        self.info_sector_dialog: InfoSectorDialog | None = None
+        self.theme_dialog: ThemeEditorDialog | None = None
         self.left_sidebar_collapsed = False
         self.view_layer_actions: dict[str, QAction] = {}
+        self.load_database_actions: dict[str, QAction] = {}
+        self.theme_presets: dict[str, ThemePreset] = {
+            UK_2026_09_INDONESIA_THEME.name: UK_2026_09_INDONESIA_THEME,
+        }
+        self.current_theme_name = ""
         self.pending_new_aircraft = False
+        self._save_view_enabled = False
         self._load_view_layer_settings()
 
         self._build_menu_bar()
@@ -1429,6 +2229,8 @@ class MainWindow(QMainWindow):
         self._build_window()
         self._wire_events()
         self._load_startup_data()
+        self._restore_last_view()
+        self._save_view_enabled = True
         self._install_shortcuts()
 
     def _build_window(self) -> None:
@@ -1439,18 +2241,24 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_work_area(), 1)
         self.setCentralWidget(root)
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._save_last_view()
+        super().closeEvent(event)
+
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
         menu_bar.setObjectName("MainMenuBar")
 
         file_menu = menu_bar.addMenu("Menu")
-        self.load_sector_action = QAction("Load Sector Files (.sct)", self)
-        self.load_sector_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
-        self.load_sector_action.triggered.connect(self.open_sector_file)
+        self.load_database_menu = file_menu.addMenu("Load Database")
+        for database_name in SECTOR_DATABASES:
+            action = QAction(database_name, self)
+            action.triggered.connect(lambda _checked=False, database_name=database_name: self.load_database(database_name))
+            self.load_database_actions[database_name] = action
+            self.load_database_menu.addAction(action)
         self.load_scenario_action = QAction("Load Scenario (.txt)", self)
         self.load_scenario_action.setShortcut(QKeySequence.Open)
         self.load_scenario_action.triggered.connect(self.open_scenario)
-        file_menu.addAction(self.load_sector_action)
         file_menu.addAction(self.load_scenario_action)
 
         view_menu = menu_bar.addMenu("View")
@@ -1458,6 +2266,9 @@ class MainWindow(QMainWindow):
         search.setShortcut(QKeySequence.Find)
         search.triggered.connect(self.search_aircraft)
         view_menu.addAction(search)
+        self.info_sector_action = QAction("Info Sector", self)
+        self.info_sector_action.triggered.connect(self.open_info_sector_dialog)
+        view_menu.addAction(self.info_sector_action)
         view_menu.addSeparator()
         for layer, checked in self.canvas.view_layers.items():
             action = QAction(layer, self)
@@ -1472,10 +2283,68 @@ class MainWindow(QMainWindow):
         self.diagrams_action.triggered.connect(self.open_diagrams_dialog)
         view_menu.addAction(self.diagrams_action)
 
+        self.theme_menu = menu_bar.addMenu("Theme")
+        self._refresh_theme_menu()
+
         help_menu = menu_bar.addMenu("Help")
-        about = QAction("About EuroScope Scenario Studio", self)
+        about = QAction(f"About EuroScope Scenario Studio v{__version__}", self)
         about.setEnabled(False)
         help_menu.addAction(about)
+
+    def _refresh_theme_menu(self) -> None:
+        if not hasattr(self, "theme_menu"):
+            return
+        self.theme_menu.clear()
+
+        preset_menu = self.theme_menu.addMenu("Presets")
+        for preset_name in sorted(self.theme_presets, key=str.casefold):
+            action = QAction(preset_name, self)
+            action.setCheckable(True)
+            action.setChecked(preset_name == self.current_theme_name)
+            action.triggered.connect(lambda _checked=False, preset_name=preset_name: self.apply_theme_preset(preset_name))
+            preset_menu.addAction(action)
+        if not self.theme_presets:
+            empty = QAction("(none)", self)
+            empty.setEnabled(False)
+            preset_menu.addAction(empty)
+
+        edit_action = QAction("Edit Colors...", self)
+        edit_action.setEnabled(bool(self.sector_colors))
+        edit_action.triggered.connect(self.open_theme_editor)
+        self.theme_menu.addAction(edit_action)
+
+    def apply_theme_preset(self, preset_name: str) -> None:
+        preset = self.theme_presets.get(preset_name)
+        if preset is None:
+            return
+        self._apply_theme_values(preset.colors, preset_name)
+
+    def open_theme_editor(self) -> None:
+        if not self.sector_colors:
+            return
+        if self.theme_dialog is not None:
+            self.theme_dialog.close()
+        dialog = ThemeEditorDialog(self.sector_colors, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.color_changed.connect(lambda name, value: self._apply_theme_values({name: value}, "Custom"))
+        dialog.destroyed.connect(lambda _=None: self._forget_theme_dialog())
+        self.theme_dialog = dialog
+        dialog.show()
+
+    def _forget_theme_dialog(self) -> None:
+        self.theme_dialog = None
+
+    def _apply_theme_values(self, values: dict[str, int], theme_name: str) -> None:
+        if not values:
+            return
+        colors = dict(self.sector_colors)
+        for name, value in values.items():
+            if 0 <= value <= 0xFFFFFF:
+                colors[name] = SectorColor(name, value)
+        self.sector_colors = colors
+        self.canvas.set_sector_colors(colors)
+        self.current_theme_name = theme_name
+        self._refresh_theme_menu()
 
     def _build_tool_bar(self) -> None:
         toolbar = QToolBar("Scenario Tools", self)
@@ -1529,6 +2398,53 @@ class MainWindow(QMainWindow):
             self.settings.setValue(self._diagram_settings_key(self.sector_path, source), hidden)
         self.settings.sync()
 
+    def _restore_last_view(self) -> None:
+        center_lat = _setting_float(self.settings.value("last_view/center_lat"))
+        center_lon = _setting_float(self.settings.value("last_view/center_lon"))
+        range_nm = _setting_float(self.settings.value("last_view/range_nm"))
+        if center_lat is None or center_lon is None or range_nm is None:
+            return
+
+        self.canvas.center_lat = center_lat
+        self.canvas.center_lon = center_lon
+        self.canvas.range_nm = _nearest_range_preset(range_nm)
+        self.canvas._sync_scale_to_range()
+        self._range_changed(self.canvas.range_nm)
+        self.canvas.update()
+
+    def _save_last_view(self) -> None:
+        if not self._save_view_enabled:
+            return
+        self.settings.setValue("last_view/center_lat", self.canvas.center_lat)
+        self.settings.setValue("last_view/center_lon", self.canvas.center_lon)
+        self.settings.setValue("last_view/range_nm", self.canvas.range_nm)
+        self.settings.sync()
+
+    def open_info_sector_dialog(self) -> None:
+        if self.info_sector_dialog is not None:
+            self.info_sector_dialog.set_info(self.sector_info)
+            self.info_sector_dialog.raise_()
+            self.info_sector_dialog.activateWindow()
+            return
+        dialog = InfoSectorDialog(self.sector_info, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.info_saved.connect(self._save_sector_info)
+        dialog.destroyed.connect(lambda _=None: setattr(self, "info_sector_dialog", None))
+        self.info_sector_dialog = dialog
+        dialog.show()
+
+    def _save_sector_info(self, lines: tuple[str, ...]) -> None:
+        if self.sector_path is None:
+            self.sector_info = parse_sector_info_lines(lines)
+            return
+        try:
+            self.sector_info = save_sector_info(self.sector_path, lines)
+        except Exception as exc:  # pragma: no cover
+            QMessageBox.critical(self, "Info Sector", f"Could not save sector info:\n{exc}")
+            return
+        if self.info_sector_dialog is not None:
+            self.info_sector_dialog.set_info(self.sector_info)
+
     def open_diagrams_dialog(self) -> None:
         if self.diagram_dialog is not None:
             self.diagram_dialog.raise_()
@@ -1550,7 +2466,7 @@ class MainWindow(QMainWindow):
         brand = QVBoxLayout()
         title = QLabel("EUROSCOPE\nSTUDIO")
         title.setObjectName("BrandTitle")
-        subtitle = QLabel(".TXT SCENARIO & ESE ENGINE")
+        subtitle = QLabel(f"v{__version__} / .TXT SCENARIO & ESE ENGINE")
         subtitle.setObjectName("BrandSubtitle")
         brand.addWidget(title)
         brand.addWidget(subtitle)
@@ -1749,13 +2665,14 @@ class MainWindow(QMainWindow):
         return timeline
 
     def _wire_events(self) -> None:
-        self.canvas.aircraft_selected.connect(self.select_aircraft)
+        self.canvas.aircraft_selected.connect(lambda aircraft: self.select_aircraft(aircraft, snap_to_target=False))
         self.canvas.aircraft_double_clicked.connect(self.open_aircraft_editor)
         self.canvas.aircraft_moved.connect(self._aircraft_changed)
         self.canvas.map_clicked.connect(self._place_new_aircraft)
         self.canvas.cursor_geo_changed.connect(self._cursor_changed)
         self.canvas.range_changed.connect(self._range_changed)
         self.canvas.diagram_visibility_changed.connect(self._save_diagram_visibility)
+        self.canvas.view_changed.connect(self._save_last_view)
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence.Delete, self, self.delete_selected_aircraft)
@@ -1763,34 +2680,56 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("I"), self, self.open_aircraft_editor)
 
     def _load_startup_data(self) -> None:
-        if DEFAULT_SECTOR.exists():
-            self.load_sector(DEFAULT_SECTOR, refresh=False)
+        self.load_database("Indonesia", refresh=False, warn_if_missing=False)
         if SAMPLE_SCENARIO.exists():
             self.load_scenario(SAMPLE_SCENARIO)
         else:
             self._refresh_all()
 
-    def load_sector(self, path: Path, refresh: bool = True) -> None:
-        self.sector_points = load_sector_points(path)
-        self.sector_lines = load_sector_lines(path, max_lines=8000, balanced=True)
+    def load_database(self, database_name: str, refresh: bool = True, warn_if_missing: bool = True) -> None:
+        path = SECTOR_DATABASES[database_name]
+        if not path.exists():
+            self.sector_status.setText(f"NO DATABASE: {database_name}")
+            if warn_if_missing:
+                QMessageBox.warning(
+                    self,
+                    "Load Database",
+                    (
+                        f"{database_name} database is not available.\n\n"
+                        "Build it with:\n"
+                        f"python -m ase_editor.build_sector_database {database_name.lower()}"
+                    ),
+                )
+            if refresh:
+                self._refresh_all()
+            return
+
+        sector_data = load_sector_database(path)
+        self.sector_points = sector_data.points
+        self.sector_lines = sector_data.lines
+        self.sector_regions = sector_data.regions
+        self.sector_labels = sector_data.labels
+        self.sector_colors = sector_data.colors
+        self.sector_info = sector_data.info
+        self.theme_presets[VACCC_INDONESIA_PRESET_NAME] = preset_from_sector_colors(
+            VACCC_INDONESIA_PRESET_NAME,
+            self.sector_colors,
+        )
+        self.current_theme_name = VACCC_INDONESIA_PRESET_NAME
         self.sector_path = path
         self.canvas.hidden_diagram_labels = self._load_diagram_visibility(path)
         if self.diagram_dialog is not None:
             self.diagram_dialog.close()
-        self.sector_status.setText(f"SCT: {path.name}")
+        if self.info_sector_dialog is not None:
+            self.info_sector_dialog.close()
+        if self.theme_dialog is not None:
+            self.theme_dialog.close()
+        self.sector_status.setText(
+            f"DB: {database_name}  {len(self.sector_points)} pts / {len(self.sector_lines)} lines"
+        )
+        self._refresh_theme_menu()
         if refresh:
             self._refresh_all()
-
-    def open_sector_file(self) -> None:
-        start = str(self.sector_path.parent if self.sector_path else ROOT)
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Sector File",
-            start,
-            "Sector Files (*.sct *.sct2);;All Files (*)",
-        )
-        if filename:
-            self.load_sector(Path(filename))
 
     def load_scenario(self, path: Path) -> None:
         try:
@@ -1876,15 +2815,13 @@ class MainWindow(QMainWindow):
         for aircraft in self.scenario.aircraft:
             if aircraft.callsign.upper() == query:
                 self.select_aircraft(aircraft)
-                self.canvas.center_lat = aircraft.latitude
-                self.canvas.center_lon = aircraft.longitude
-                self.canvas.update()
                 return
         point = self.sector_points.get(query)
         if point:
             self.canvas.center_lat = point.latitude
             self.canvas.center_lon = point.longitude
             self.canvas.update()
+            self._save_last_view()
 
     def save_draft_placeholder(self) -> None:
         QMessageBox.information(
@@ -1900,8 +2837,12 @@ class MainWindow(QMainWindow):
             "ILS threshold authoring is reserved for the next implementation slice.",
         )
 
-    def select_aircraft(self, aircraft: Aircraft | None) -> None:
+    def select_aircraft(self, aircraft: Aircraft | None, snap_to_target: bool = True) -> None:
         self.selected = aircraft
+        if aircraft is not None and snap_to_target:
+            self.canvas.center_lat = aircraft.latitude
+            self.canvas.center_lon = aircraft.longitude
+            self._save_last_view()
         self.canvas.set_selected(aircraft)
         self._refresh_strips()
 
@@ -1948,7 +2889,15 @@ class MainWindow(QMainWindow):
         self.canvas.set_range_nm(RANGE_PRESETS_NM[index])
 
     def _refresh_all(self) -> None:
-        self.canvas.set_data(self.scenario, self.sector_points, self.sector_lines, self.selected)
+        self.canvas.set_data(
+            self.scenario,
+            self.sector_points,
+            self.sector_lines,
+            self.sector_regions,
+            self.sector_labels,
+            self.sector_colors,
+            self.selected,
+        )
         self._refresh_strips()
         self._refresh_metrics()
 
@@ -1965,12 +2914,32 @@ class MainWindow(QMainWindow):
             if widget:
                 widget.deleteLater()
         self.strip_rows = []
-        for aircraft in self.scenario.aircraft:
-            row = self._flight_strip(aircraft)
-            row.clicked.connect(lambda aircraft=aircraft: self.select_aircraft(aircraft))
-            row.double_clicked.connect(lambda aircraft=aircraft: self.open_aircraft_editor(aircraft))
-            self.strip_layout.insertWidget(self.strip_layout.count() - 1, row)
-            self.strip_rows.append(row)
+        self.strip_category_rows = {}
+        groups = (
+            ("Ground Vehicle", [target for target in self.scenario.aircraft if target.target_kind == "vehicle"]),
+            ("Aircraft", [target for target in self.scenario.aircraft if target.target_kind != "vehicle"]),
+        )
+        for title, aircraft_group in groups:
+            if not aircraft_group:
+                continue
+            header = self._strip_category_header(title, len(aircraft_group))
+            header.toggled.connect(self._toggle_strip_category)
+            self.strip_layout.insertWidget(self.strip_layout.count() - 1, header)
+            group_rows: list[ClickableFrame] = []
+            for aircraft in aircraft_group:
+                row = self._flight_strip(aircraft)
+                row.clicked.connect(lambda aircraft=aircraft: self.select_aircraft(aircraft))
+                row.double_clicked.connect(lambda aircraft=aircraft: self.open_aircraft_editor(aircraft))
+                self.strip_layout.insertWidget(self.strip_layout.count() - 1, row)
+                self.strip_rows.append(row)
+                group_rows.append(row)
+            self.strip_category_rows[title] = (header, group_rows)
+        self._apply_strip_visibility()
+
+    def _strip_category_header(self, title: str, count: int) -> StripCategoryHeader:
+        header = StripCategoryHeader(title, count)
+        header.set_collapsed(title in self.collapsed_strip_categories)
+        return header
 
     def _flight_strip(self, aircraft: Aircraft) -> ClickableFrame:
         selected = aircraft is self.selected
@@ -2012,9 +2981,29 @@ class MainWindow(QMainWindow):
         return row
 
     def _filter_strips(self, text: str) -> None:
-        query = text.strip().upper()
+        self.strip_filter_query = text.strip().upper()
+        self._apply_strip_visibility()
+
+    def _toggle_strip_category(self, title: str) -> None:
+        if title in self.collapsed_strip_categories:
+            self.collapsed_strip_categories.remove(title)
+        else:
+            self.collapsed_strip_categories.add(title)
+        header_rows = self.strip_category_rows.get(title)
+        if header_rows:
+            header_rows[0].set_collapsed(title in self.collapsed_strip_categories)
+        self._apply_strip_visibility()
+
+    def _apply_strip_visibility(self) -> None:
+        query = getattr(self, "strip_filter_query", "")
         for row in self.strip_rows:
             row.setVisible(query in row.property("searchText"))
+        for title, (header, rows) in self.strip_category_rows.items():
+            any_match = any(not row.isHidden() for row in rows)
+            header.setVisible(any_match)
+            if title in self.collapsed_strip_categories:
+                for row in rows:
+                    row.setVisible(False)
 
     def _classify_targets(self) -> None:
         for aircraft in self.scenario.aircraft:
@@ -2289,18 +3278,43 @@ QLineEdit:disabled, QSpinBox:disabled {
     color: #607586;
     border-color: #122131;
 }
+QComboBox {
+    padding-right: 24px;
+}
+QSpinBox, QDoubleSpinBox {
+    padding-right: 24px;
+}
 QComboBox::drop-down {
     border-left: 1px solid #122131;
     width: 18px;
 }
 QComboBox::down-arrow {
-    image: none;
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 6px solid #ffffff;
-    margin-right: 5px;
+    image: url(asset/dropdown-arrow.svg);
+    width: 10px;
+    height: 7px;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #122131;
+    border-bottom: 1px solid #122131;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid #122131;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(asset/spin-up-arrow.svg);
+    width: 8px;
+    height: 5px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(asset/spin-down-arrow.svg);
+    width: 8px;
+    height: 5px;
 }
 QComboBox QAbstractItemView {
     background: #010f1f;
@@ -2587,6 +3601,22 @@ QLabel#SectorStatus {
     font-size: 10px;
     font-weight: 700;
 }
+QFrame#StripCategoryHeader {
+    background: #0d1c2d;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.16);
+}
+QFrame#StripCategoryHeader:hover {
+    background: #122131;
+}
+QLabel#StripCategoryText, QLabel#StripCategoryArrow {
+    color: #ffb95f;
+    font-family: JetBrains Mono, Consolas, monospace;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#StripCategoryArrow {
+    min-width: 10px;
+}
 QFrame#LayerRow {
     background: #0d1c2d;
     border-radius: 2px;
@@ -2734,18 +3764,43 @@ QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QListWidget, QComboBox {
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border-color: #4cd7f6;
 }
+QComboBox {
+    padding-right: 24px;
+}
+QSpinBox, QDoubleSpinBox {
+    padding-right: 24px;
+}
 QComboBox::drop-down {
     border-left: 1px solid #122131;
     width: 18px;
 }
 QComboBox::down-arrow {
-    image: none;
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 6px solid #ffffff;
-    margin-right: 5px;
+    image: url(asset/dropdown-arrow.svg);
+    width: 10px;
+    height: 7px;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #122131;
+    border-bottom: 1px solid #122131;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid #122131;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(asset/spin-up-arrow.svg);
+    width: 8px;
+    height: 5px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(asset/spin-down-arrow.svg);
+    width: 8px;
+    height: 5px;
 }
 QLineEdit#SearchInput {
     background: #010f1f;
