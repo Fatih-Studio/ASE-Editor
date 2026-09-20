@@ -2,7 +2,7 @@
 
 Native Python desktop prototype for editing EuroScope scenario situations. The app is currently a PySide6 workbench that loads a EuroScope scenario `.txt` file such as `WIHH_example.txt`, overlays packaged Indonesia sector database data, and lets us inspect and edit traffic on a dark tactical radar canvas.
 
-The current implementation follows the local PRD and the Stitch reference in `stitch_flight_scenario_route_editor/`, but the source of truth is now the Python app in `ase_editor/`.
+The current implementation follows the local PRD, and the source of truth is now the Python app in `ase_editor/`.
 
 Current version: `v1.1.0`.
 
