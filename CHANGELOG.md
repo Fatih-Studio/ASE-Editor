@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.0
+
+Saveable scenario export release.
+
+Implemented:
+
+- Adds normalized EuroScope scenario `.txt` serialization.
+- Preserves global and aircraft-local unknown lines during parse-edit-export.
+- Saves edited scenarios through `Menu > Save`, `Menu > Save As...`, and the header export button.
+- Adds parse-edit-export regression coverage for sample traffic, edited aircraft fields, unknown lines, and UI save actions.
+
+Verified:
+
+- Parser, exporter, sector database, and UI smoke coverage pass.
+
 ## v1.0.0
 
 Baseline interactive workbench release.

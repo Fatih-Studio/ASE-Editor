@@ -13,6 +13,7 @@ def parse_scenario_file(path: str | Path) -> Scenario:
 def parse_scenario_text(text: str, source_path: str | Path | None = None) -> Scenario:
     scenario = Scenario(source_path=Path(source_path) if source_path else None)
     current: Aircraft | None = None
+    pending_pseudo_pilot = ""
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -21,25 +22,30 @@ def parse_scenario_text(text: str, source_path: str | Path | None = None) -> Sce
 
         if line.startswith("@"):
             current = _parse_aircraft_position(line)
+            current.pseudo_pilot = pending_pseudo_pilot
+            pending_pseudo_pilot = ""
             current.raw_lines.append(raw_line)
             scenario.aircraft.append(current)
             continue
 
         if line.startswith("PSEUDOPILOT:"):
-            scenario.pseudo_pilots.append(line.split(":", 1)[1])
-            if current is not None:
-                current.raw_lines.append(raw_line)
+            pending_pseudo_pilot = line.split(":", 1)[1]
+            if current is None and _is_initial_global_pseudo_pilot(scenario):
+                scenario.pseudo_pilots.append(pending_pseudo_pilot)
             continue
 
         if line.startswith("AIRPORT_ALT:"):
+            pending_pseudo_pilot = ""
             scenario.airport_altitude = _float_or_none(line.split(":", 1)[1])
             continue
 
         if line.startswith("METAR:"):
+            pending_pseudo_pilot = ""
             scenario.metar = line.split(":", 1)[1]
             continue
 
         if line.startswith("ILS"):
+            pending_pseudo_pilot = ""
             threshold = _parse_threshold(line)
             if threshold:
                 scenario.thresholds.append(threshold)
@@ -48,6 +54,7 @@ def parse_scenario_text(text: str, source_path: str | Path | None = None) -> Sce
             continue
 
         if line.startswith("HOLDING:"):
+            pending_pseudo_pilot = ""
             hold = _parse_hold(line)
             if hold:
                 scenario.holds.append(hold)
@@ -88,6 +95,7 @@ def parse_scenario_text(text: str, source_path: str | Path | None = None) -> Sce
             continue
 
         if current is None:
+            pending_pseudo_pilot = ""
             scenario.unknown_lines.append(raw_line)
         else:
             current.unknown_lines.append(raw_line)
@@ -113,6 +121,18 @@ def _parse_aircraft_position(line: str) -> Aircraft:
         trailing_flag=_part(parts, 9),
     )
     return aircraft
+
+
+def _is_initial_global_pseudo_pilot(scenario: Scenario) -> bool:
+    return (
+        not scenario.aircraft
+        and scenario.airport_altitude is None
+        and not scenario.metar
+        and not scenario.thresholds
+        and not scenario.holds
+        and not scenario.unknown_lines
+        and not scenario.pseudo_pilots
+    )
 
 
 def _parse_flight_plan(line: str) -> FlightPlan:

@@ -43,7 +43,9 @@ def test_main_window_loads_sample_and_updates_selected_aircraft(tmp_path, monkey
     assert not hasattr(window, "load_sector_action")
     assert window.load_database_menu.title() == "Load Database"
     assert window.load_database_actions["Indonesia"].text() == "Indonesia"
-    assert window.load_scenario_action.text() == "Load Scenario (.txt)"
+    assert window.load_scenario_action.text() == "Load Scenario"
+    assert window.save_scenario_action.text() == "Save Scenario"
+    assert window.save_scenario_as_action.text() == "Save Scenario As"
     menu_actions = [action.text() for action in window.menuBar().actions()[0].menu().actions()]
     assert "Load Database" in menu_actions
     assert "Load Sector Files (.sct)" not in menu_actions
@@ -172,4 +174,41 @@ def test_view_and_geo_diagram_visibility_persist_between_windows(tmp_path, monke
     assert restored.diagram_dialog is not None
     assert not restored.diagram_dialog.show_all_checks["GEO"].isChecked()
     restored.close()
+    app.processEvents()
+
+
+def test_main_window_save_and_save_as_write_scenario(tmp_path, monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("ASE_EDITOR_SETTINGS_PATH", str(tmp_path / "settings.ini"))
+
+    from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+    from ase_editor.ui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    saved_paths: list[Path] = []
+
+    def fake_write_scenario_file(_scenario, path) -> None:
+        saved_paths.append(Path(path))
+
+    monkeypatch.setattr("ase_editor.ui.write_scenario_file", fake_write_scenario_file)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+
+    save_path = tmp_path / "current.txt"
+    window.scenario.source_path = save_path
+    window.save_scenario_action.trigger()
+
+    assert saved_paths == [save_path]
+    assert window.scenario.source_path == save_path
+
+    save_as_path = tmp_path / "renamed.txt"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(save_as_path), ""))
+    window.save_scenario_as_action.trigger()
+
+    assert saved_paths == [save_path, save_as_path]
+    assert window.scenario.source_path == save_as_path
+    assert not hasattr(window, "save_draft_placeholder")
+
+    window.close()
     app.processEvents()

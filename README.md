@@ -4,7 +4,7 @@ Native Python desktop prototype for editing EuroScope scenario situations. The a
 
 The current implementation follows the local PRD and the Stitch reference in `stitch_flight_scenario_route_editor/`, but the source of truth is now the Python app in `ase_editor/`.
 
-Current version: `v1.0.0`.
+Current version: `v1.1.0`.
 
 Version log: see `CHANGELOG.md`.
 
@@ -25,7 +25,7 @@ python -m ase_editor.build_sector_database indonesia
 
 ## Current Position
 
-We are at `v1.0.0`, the interactive prototype / alpha-workbench baseline.
+We are at `v1.1.0`, the saveable scenario slice.
 
 Implemented checklist:
 
@@ -43,19 +43,18 @@ Implemented checklist:
 - [x] `View > Info Sector` dialog for structured sector `[INFO]` metadata editing.
 - [x] Aircraft workflows for select, search, copy, delete, drag-to-move, and click-to-place new aircraft.
 - [x] Aircraft editor popup for callsign, position, squawk, altitude, speed, heading, route, delay, and flight-plan fields.
+- [x] Normalized EuroScope scenario `.txt` export and save/save-as workflows.
+- [x] Parse-edit-export coverage for sample traffic, edited aircraft fields, and unknown-line preservation.
 - [x] Layer toggles, diagram visibility controls, collapsed traffic categories, last-view restore, and settings persistence.
-- [x] Parser, sector database, and UI smoke tests for the current baseline.
+- [x] Parser, exporter, sector database, and UI smoke tests for the current baseline.
 
 Still placeholder / not done:
 
-- [ ] EuroScope scenario `.txt` export and save.
-- [ ] Parse-edit-export round-trip safety.
-- [ ] Scenario edits persisted back to disk.
 - [ ] FlightPlanDB integration.
 - [ ] Real ILS threshold creation.
 - [ ] Sector geometry editing.
 - [ ] `.sct` export/write-back.
-- [ ] Broader tests for theme editing, sector info saving, database rebuild output, and export behavior.
+- [ ] Broader tests for theme editing, sector info saving, database rebuild output, and uncommon export records.
 
 ## Milestone: v1.0.0 Alpha Workbench Baseline
 
@@ -77,13 +76,6 @@ Acceptance snapshot:
 - Verify parser and UI behavior with `pytest`.
 
 ## Future Updates
-
-### v1.1: Saveable Scenario Slice
-
-- Implement EuroScope scenario `.txt` export from the current in-memory scenario, using `WIHH_example.txt` as the reference shape.
-- Preserve unknown lines during export so hand-authored scenario content is not lost.
-- Add focused tests for parse-edit-export behavior.
-- Replace export placeholders with real file save actions.
 
 ### v1.2: Round-Trip Safety
 
@@ -111,12 +103,14 @@ Acceptance snapshot:
 - `ase_editor/__main__.py` - CLI entry point for `python -m ase_editor`.
 - `ase_editor/models.py` - scenario, aircraft, flight-plan, threshold, hold, and route data models.
 - `ase_editor/parser.py` - EuroScope scenario `.txt` parser.
+- `ase_editor/exporter.py` - normalized EuroScope scenario `.txt` serializer and file writer.
 - `ase_editor/sector.py` - full sector parsing helpers for `.sct`-style points, lines, regions, labels, and colors.
 - `ase_editor/sector_database.py` - SQLite sector database build/load helpers.
 - `ase_editor/build_sector_database.py` - CLI entry point for rebuilding packaged sector databases.
 - `ase_editor/theme.py` - built-in sector color presets and `.sct` color-theme helpers.
 - `ase_editor/ui.py` - PySide6 app, radar canvas, dialogs, menus, toolbars, and editor workflow.
 - `tests/test_parser.py` - parser and sector parsing coverage.
+- `tests/test_exporter.py` - parse-edit-export and serializer coverage.
 - `tests/test_ui_smoke.py` - offscreen PySide6 smoke tests for the current UI workflow.
 - `asset/` - icons used by aircraft, vehicles, toolbar actions, and Qt styles.
 - `WIHH_example.txt` - startup scenario sample and next export reference.

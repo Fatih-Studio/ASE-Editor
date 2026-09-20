@@ -55,6 +55,7 @@ class Aircraft:
     perf_profile: str = ""
     wake_category: str = ""
     target_kind: str = "aircraft"
+    pseudo_pilot: str = ""
     raw_lines: list[str] = field(default_factory=list)
     unknown_lines: list[str] = field(default_factory=list)
 

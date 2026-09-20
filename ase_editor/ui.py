@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .exporter import write_scenario_file
 from .models import Aircraft, FlightPlan, Scenario
 from .parser import parse_scenario_file
 from .sector import (
@@ -1352,310 +1353,6 @@ class RadarCanvas(QWidget):
         return DEFAULT_AIRCRAFT_LENGTH_METERS
 
 
-class RouteTargetDock(QWidget):
-    aircraft_changed = Signal(object)
-    route_changed = Signal(object)
-    export_requested = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setFixedWidth(384)
-        self.aircraft: Aircraft | None = None
-        self._loading = False
-        self._build_widgets()
-        self._wire_widgets()
-        self._set_enabled(False)
-
-    def set_aircraft(self, aircraft: Aircraft | None) -> None:
-        self.aircraft = aircraft
-        self._loading = True
-        try:
-            self._set_enabled(aircraft is not None)
-            if aircraft is None:
-                self._clear()
-                return
-            self.target_title.setText(f"{aircraft.callsign} ({aircraft.perf_profile or aircraft.flight_plan.aircraft_type or 'NO PERF'})")
-            self.origin.setText(aircraft.flight_plan.departure)
-            self.destination.setText(aircraft.flight_plan.arrival)
-            self.departure_runway.setText(_route_runway(aircraft.flight_plan.route_text, aircraft.flight_plan.departure))
-            self.arrival_runway.setText(_route_runway(aircraft.flight_plan.route_text, aircraft.flight_plan.arrival))
-            self.route_text.setPlainText(aircraft.route_source)
-            self.callsign.setText(aircraft.callsign)
-            self.aircraft_type.setText(aircraft.flight_plan.aircraft_type)
-            self.wake_category.setText(aircraft.wake_category)
-            self.squawk.setText(aircraft.squawk)
-            self.mode_c.setChecked(aircraft.mode_c == "1")
-            self.latitude.setValue(aircraft.latitude)
-            self.longitude.setValue(aircraft.longitude)
-            self.altitude.setValue(aircraft.altitude)
-            self.cleared_fl.setValue(aircraft.cleared_flight_level or aircraft.actual_flight_level)
-            self.ground_speed.setValue(aircraft.ground_speed)
-            self.heading.setValue(max(1, min(360, int(round(aircraft.heading_degrees)) or 1)))
-            self.ias_variation.setValue(aircraft.ias_variation)
-            self.dummy_controller.setText(aircraft.dummy_controller)
-            self.perf_profile.setText(aircraft.perf_profile)
-            self.delay.setText(aircraft.delay_text)
-            self.remarks.setPlainText(aircraft.flight_plan.remarks)
-            self._refresh_waypoints()
-        finally:
-            self._loading = False
-
-    def sync_position_fields(self) -> None:
-        if not self.aircraft or self._loading:
-            return
-        self._loading = True
-        self.latitude.setValue(self.aircraft.latitude)
-        self.longitude.setValue(self.aircraft.longitude)
-        self._loading = False
-
-    def _build_widgets(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        layout.addWidget(_section_title("FPDB & EuroScope Route Assembler", ".ESE ROUTING"))
-        route_grid = QGridLayout()
-        self.origin = _line("EGLL")
-        self.departure_runway = _line("27L")
-        self.destination = _line("EDDF")
-        self.arrival_runway = _line("25C")
-        route_grid.addWidget(_field("ORIGIN ICAO", self.origin), 0, 0)
-        route_grid.addWidget(_field("DEP RWY", self.departure_runway), 0, 1)
-        route_grid.addWidget(_field("DEST ICAO", self.destination), 1, 0)
-        route_grid.addWidget(_field("ARR RWY", self.arrival_runway), 1, 1)
-        layout.addLayout(route_grid)
-        self.fetch_route = QPushButton("PARSE ROUTE TO EUROSCOPE .TXT")
-        self.fetch_route.setObjectName("PrimaryButton")
-        layout.addWidget(self.fetch_route)
-        self.route_text = QPlainTextEdit()
-        self.route_text.setMinimumHeight(76)
-        layout.addWidget(_field("EUROSCOPE ROUTE STRING (.TXT FORMAT)", self.route_text))
-
-        self.waypoints = QListWidget()
-        self.waypoints.setMinimumHeight(86)
-        waypoint_buttons = QHBoxLayout()
-        self.add_waypoint = QPushButton("ADD")
-        self.remove_waypoint = QPushButton("REMOVE")
-        self.move_up = QPushButton("UP")
-        self.move_down = QPushButton("DOWN")
-        for button in (self.add_waypoint, self.remove_waypoint, self.move_up, self.move_down):
-            waypoint_buttons.addWidget(button)
-        layout.addLayout(waypoint_buttons)
-        layout.addWidget(_field("ROUTE TOKENS", self.waypoints))
-
-        layout.addWidget(_divider())
-        self.target_title = QLabel("No Target")
-        self.target_title.setObjectName("DockCallsign")
-        layout.addWidget(_section_title("EuroScope Flight Plan & Target", self.target_title))
-
-        form_grid = QGridLayout()
-        self.callsign = _line()
-        self.aircraft_type = _line()
-        self.wake_category = _line()
-        self.squawk = _line()
-        self.squawk.setValidator(QRegularExpressionValidator(QRegularExpression("[0-7]{0,4}")))
-        self.mode_c = QCheckBox("MODE C")
-        self.latitude = _double_spin(-90, 90, 7)
-        self.longitude = _double_spin(-180, 180, 7)
-        self.altitude = _int_spin(-1000, 60000, 100)
-        self.cleared_fl = _int_spin(0, 660, 10)
-        self.ground_speed = _int_spin(0, 1200, 10)
-        self.heading = _int_spin(1, 360, 1)
-        self.ias_variation = _int_spin(-99, 99, 1)
-        self.dummy_controller = _line()
-        self.perf_profile = _line()
-        self.delay = _line()
-        self.remarks = QPlainTextEdit()
-        self.remarks.setMaximumHeight(70)
-
-        form_grid.addWidget(_field("CALLSIGN", self.callsign), 0, 0)
-        form_grid.addWidget(_field("TYPE / WAKE", _row(self.aircraft_type, self.wake_category)), 0, 1)
-        form_grid.addWidget(_field("LAT / LON", _row(self.latitude, self.longitude)), 1, 0)
-        form_grid.addWidget(_field("SQUAWK & MODE", _row(self.squawk, self.mode_c)), 1, 1)
-        form_grid.addWidget(_field("INITIAL / CLEARED FL", _row(self.altitude, self.cleared_fl)), 2, 0)
-        form_grid.addWidget(_field("INITIAL IAS / HDG", _row(self.ground_speed, self.heading)), 2, 1)
-        form_grid.addWidget(_field("IAS VARIATION", self.ias_variation), 3, 0)
-        form_grid.addWidget(_field("TARGET CONTROLLER", self.dummy_controller), 3, 1)
-        form_grid.addWidget(_field("PERF PROFILE", self.perf_profile), 4, 0)
-        form_grid.addWidget(_field("START DELAY", self.delay), 4, 1)
-        layout.addLayout(form_grid)
-        layout.addWidget(_field("REMARKS", self.remarks))
-        self.commit = QPushButton("UPDATE EUROSCOPE SCENARIO DEFINITION")
-        self.commit.setObjectName("PrimaryButton")
-        layout.addWidget(self.commit)
-        layout.addStretch(1)
-        layout.addWidget(_divider())
-        layout.addWidget(_section_title("EuroScope Scenario Authoring & Export", ""))
-        export_row = QHBoxLayout()
-        self.copy_txt = QPushButton("COPY .TXT BLOCK")
-        self.generate_ese = QPushButton("GENERATE .ESE ROUTE")
-        export_row.addWidget(self.copy_txt)
-        export_row.addWidget(self.generate_ese)
-        layout.addLayout(export_row)
-        self.export_txt = QPushButton("EXPORT EUROSCOPE SCENARIO (.TXT)")
-        self.export_txt.setObjectName("PrimaryButton")
-        self.sync_repo = QPushButton("SYNC TO EUROSCOPE SCENARIO REPOSITORY")
-        layout.addWidget(self.export_txt)
-        layout.addWidget(self.sync_repo)
-
-    def _wire_widgets(self) -> None:
-        self.fetch_route.clicked.connect(self._show_flightplandb_placeholder)
-        self.add_waypoint.clicked.connect(self._add_waypoint)
-        self.remove_waypoint.clicked.connect(self._remove_waypoint)
-        self.move_up.clicked.connect(lambda: self._move_waypoint(-1))
-        self.move_down.clicked.connect(lambda: self._move_waypoint(1))
-        self.commit.clicked.connect(self._field_changed)
-        for button in (self.copy_txt, self.generate_ese, self.export_txt, self.sync_repo):
-            button.clicked.connect(self.export_requested)
-
-        for edit in (
-            self.origin,
-            self.destination,
-            self.callsign,
-            self.aircraft_type,
-            self.wake_category,
-            self.squawk,
-            self.dummy_controller,
-            self.perf_profile,
-            self.delay,
-        ):
-            edit.textEdited.connect(self._field_changed)
-        for spin in (
-            self.latitude,
-            self.longitude,
-            self.altitude,
-            self.cleared_fl,
-            self.ground_speed,
-            self.heading,
-            self.ias_variation,
-        ):
-            spin.valueChanged.connect(self._field_changed)
-        self.mode_c.stateChanged.connect(self._field_changed)
-        self.remarks.textChanged.connect(self._field_changed)
-        self.route_text.textChanged.connect(self._route_text_changed)
-
-    def _set_enabled(self, enabled: bool) -> None:
-        for child in self.findChildren(QWidget):
-            child.setEnabled(enabled)
-
-    def _clear(self) -> None:
-        for edit in (
-            self.origin,
-            self.departure_runway,
-            self.destination,
-            self.arrival_runway,
-            self.callsign,
-            self.aircraft_type,
-            self.wake_category,
-            self.squawk,
-            self.dummy_controller,
-            self.perf_profile,
-            self.delay,
-        ):
-            edit.clear()
-        self.mode_c.setChecked(False)
-        self.latitude.setValue(0)
-        self.longitude.setValue(0)
-        self.altitude.setValue(0)
-        self.cleared_fl.setValue(0)
-        self.ground_speed.setValue(0)
-        self.heading.setValue(1)
-        self.ias_variation.setValue(0)
-        self.route_text.clear()
-        self.remarks.clear()
-        self.waypoints.clear()
-        self.target_title.setText("No Target")
-
-    def _field_changed(self) -> None:
-        if self._loading or self.aircraft is None:
-            return
-        aircraft = self.aircraft
-        aircraft.callsign = self.callsign.text().strip().upper()
-        aircraft.flight_plan.callsign = aircraft.callsign
-        aircraft.flight_plan.departure = self.origin.text().strip().upper()
-        aircraft.flight_plan.arrival = self.destination.text().strip().upper()
-        aircraft.flight_plan.aircraft_type = self.aircraft_type.text().strip().upper()
-        aircraft.wake_category = self.wake_category.text().strip().upper()
-        aircraft.squawk = self.squawk.text().strip()
-        aircraft.mode_c = "1" if self.mode_c.isChecked() else "0"
-        aircraft.latitude = self.latitude.value()
-        aircraft.longitude = self.longitude.value()
-        aircraft.altitude = self.altitude.value()
-        aircraft.cleared_flight_level = self.cleared_fl.value()
-        aircraft.ground_speed = self.ground_speed.value()
-        aircraft.heading_raw = self.heading.value()
-        aircraft.ias_variation = self.ias_variation.value()
-        aircraft.dummy_controller = self.dummy_controller.text().strip().upper()
-        aircraft.perf_profile = self.perf_profile.text().strip()
-        aircraft.flight_plan.remarks = self.remarks.toPlainText().strip()
-        self._apply_delay_text(aircraft)
-        self.target_title.setText(f"{aircraft.callsign} ({aircraft.perf_profile or aircraft.flight_plan.aircraft_type or 'NO PERF'})")
-        self.aircraft_changed.emit(aircraft)
-
-    def _route_text_changed(self) -> None:
-        if self._loading or self.aircraft is None:
-            return
-        self.aircraft.editor_route = self.route_text.toPlainText().strip().upper()
-        self._refresh_waypoints()
-        self.route_changed.emit(self.aircraft)
-
-    def _refresh_waypoints(self) -> None:
-        self.waypoints.clear()
-        if self.aircraft:
-            self.waypoints.addItems(self.aircraft.route_tokens)
-
-    def _add_waypoint(self) -> None:
-        if not self.aircraft:
-            return
-        waypoint, ok = QInputDialog.getText(self, "Add Waypoint", "Waypoint")
-        if ok and waypoint.strip():
-            self._set_route_tokens([*self.aircraft.route_tokens, waypoint.strip().upper()])
-
-    def _remove_waypoint(self) -> None:
-        row = self.waypoints.currentRow()
-        if row < 0 or not self.aircraft:
-            return
-        tokens = self.aircraft.route_tokens
-        del tokens[row]
-        self._set_route_tokens(tokens)
-
-    def _move_waypoint(self, delta: int) -> None:
-        row = self.waypoints.currentRow()
-        if row < 0 or not self.aircraft:
-            return
-        tokens = self.aircraft.route_tokens
-        new_row = row + delta
-        if not 0 <= new_row < len(tokens):
-            return
-        tokens[row], tokens[new_row] = tokens[new_row], tokens[row]
-        self._set_route_tokens(tokens)
-        self.waypoints.setCurrentRow(new_row)
-
-    def _set_route_tokens(self, tokens: list[str]) -> None:
-        self.route_text.setPlainText(" ".join(tokens))
-
-    def _show_flightplandb_placeholder(self) -> None:
-        QMessageBox.information(
-            self,
-            "FlightPlanDB",
-            "FlightPlanDB querying is reserved for the next slice. "
-            "The route assembler already captures origin, destination, runway, and normalized tokens.",
-        )
-
-    def _apply_delay_text(self, aircraft: Aircraft) -> None:
-        text = self.delay.text().strip()
-        if not text:
-            aircraft.delay_min = None
-            aircraft.delay_max = None
-            return
-        parts = text.split(":", 1)
-        try:
-            aircraft.delay_min = int(parts[0])
-            aircraft.delay_max = int(parts[1]) if len(parts) > 1 else None
-        except ValueError:
-            pass
-
-
 class AircraftEditorDialog(QDialog):
     aircraft_saved = Signal(object)
 
@@ -2256,10 +1953,18 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, database_name=database_name: self.load_database(database_name))
             self.load_database_actions[database_name] = action
             self.load_database_menu.addAction(action)
-        self.load_scenario_action = QAction("Load Scenario (.txt)", self)
+        self.load_scenario_action = QAction("Load Scenario", self)
         self.load_scenario_action.setShortcut(QKeySequence.Open)
         self.load_scenario_action.triggered.connect(self.open_scenario)
         file_menu.addAction(self.load_scenario_action)
+        self.save_scenario_action = QAction("Save Scenario", self)
+        self.save_scenario_action.setShortcut(QKeySequence.Save)
+        self.save_scenario_action.triggered.connect(self.save_scenario)
+        file_menu.addAction(self.save_scenario_action)
+        self.save_scenario_as_action = QAction("Save Scenario As", self)
+        self.save_scenario_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.save_scenario_as_action.triggered.connect(self.save_scenario_as)
+        file_menu.addAction(self.save_scenario_as_action)
 
         view_menu = menu_bar.addMenu("View")
         search = QAction("Search", self)
@@ -2486,7 +2191,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.scenario_clock)
         export = QPushButton("Export\n.TXT")
         export.setObjectName("PrimaryButton")
-        export.clicked.connect(self.save_draft_placeholder)
+        export.clicked.connect(self.save_scenario_as)
         layout.addWidget(export)
         return header
 
@@ -2590,9 +2295,11 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout(self.traffic_title_container)
         title_box.setContentsMargins(10, 10, 10, 10)
         title_box.setSpacing(2)
-        title = QLabel("EUROSCOPE TRAFFIC EDITOR")
+        title = QLabel("ATC SIMULATOR SCENARIO \nEDITOR")
         title.setObjectName("DockTitle")
+        title.setAlignment(Qt.AlignCenter)
         self.sector_status.setObjectName("SectorStatus")
+        self.sector_status.setAlignment(Qt.AlignCenter)
         title_box.addWidget(title)
         title_box.addWidget(self.sector_status)
         self.collapse_button = QPushButton("<")
@@ -2752,6 +2459,33 @@ class MainWindow(QMainWindow):
         if filename:
             self.load_scenario(Path(filename))
 
+    def save_scenario(self) -> None:
+        if self.scenario.source_path is None:
+            self.save_scenario_as()
+            return
+        self.save_scenario_to_path(self.scenario.source_path)
+
+    def save_scenario_as(self) -> None:
+        start = str(self.scenario.source_path if self.scenario.source_path else ROOT / "scenario.txt")
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Scenario",
+            start,
+            "Scenario Files (*.txt);;All Files (*)",
+        )
+        if filename:
+            self.save_scenario_to_path(Path(filename))
+
+    def save_scenario_to_path(self, path: str | Path) -> None:
+        output_path = Path(path)
+        try:
+            write_scenario_file(self.scenario, output_path)
+        except Exception as exc:  # pragma: no cover
+            QMessageBox.critical(self, "Save Scenario", f"Could not save scenario:\n{exc}")
+            return
+        self.scenario.source_path = output_path
+        QMessageBox.information(self, "Save Scenario", f"Saved scenario:\n{output_path}")
+
     def new_aircraft(self, checked: bool = True) -> None:
         self._set_aircraft_placement_mode(checked)
 
@@ -2780,6 +2514,7 @@ class MainWindow(QMainWindow):
             cleared_flight_level=30,
             perf_profile="A320.prf",
             target_kind="aircraft",
+            pseudo_pilot="ALL",
         )
         self.scenario.aircraft.append(aircraft)
         self.select_aircraft(aircraft)
@@ -2822,13 +2557,6 @@ class MainWindow(QMainWindow):
             self.canvas.center_lon = point.longitude
             self.canvas.update()
             self._save_last_view()
-
-    def save_draft_placeholder(self) -> None:
-        QMessageBox.information(
-            self,
-            "Export TXT",
-            "EuroScope .txt export and repository sync are reserved for the next implementation slice.",
-        )
 
     def add_ils_threshold_placeholder(self) -> None:
         QMessageBox.information(
@@ -3218,13 +2946,6 @@ def _mono(text: str, color: str = "plain") -> QLabel:
 def _int_text(text: str) -> int:
     match = re.search(r"\d+", text or "")
     return int(match.group(0)) if match else 0
-
-
-def _route_runway(route: str, icao: str) -> str:
-    if not route or not icao:
-        return ""
-    match = re.search(rf"\b{re.escape(icao)}/([0-9]{{2}}[LRC]?)\b", route, flags=re.IGNORECASE)
-    return match.group(1).upper() if match else ""
 
 
 def _flight_type_label(value: str) -> str:
