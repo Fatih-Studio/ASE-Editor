@@ -58,6 +58,8 @@ class Aircraft:
     pseudo_pilot: str = ""
     raw_lines: list[str] = field(default_factory=list)
     unknown_lines: list[str] = field(default_factory=list)
+    source_records: list[SourceRecord] = field(default_factory=list, repr=False, compare=False)
+    original_values: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def display_speed(self) -> str:
@@ -119,6 +121,18 @@ class Hold:
 
 
 @dataclass(slots=True)
+class SourceRecord:
+    """An ordered input record, independently of its editable model projection."""
+
+    kind: str
+    text: str
+    owner: Aircraft | None = field(default=None, repr=False, compare=False)
+    values: dict[str, object] = field(default_factory=dict)
+    item: Threshold | Hold | None = None
+    index: int | None = None
+
+
+@dataclass(slots=True)
 class Scenario:
     source_path: Path | None = None
     airport_altitude: float | None = None
@@ -128,6 +142,8 @@ class Scenario:
     thresholds: list[Threshold] = field(default_factory=list)
     holds: list[Hold] = field(default_factory=list)
     unknown_lines: list[str] = field(default_factory=list)
+    source_records: list[SourceRecord] = field(default_factory=list, repr=False, compare=False)
+    original_values: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def all_geo_points(self) -> list[tuple[float, float]]:
         points: list[tuple[float, float]] = []

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+import math
 from pathlib import Path
 
-from .models import Aircraft, FlightPlan, Hold, Scenario, Threshold
+from .models import Aircraft, FlightPlan, Hold, Scenario, SourceRecord, Threshold
+from .records import aircraft_values
 
 
 def parse_scenario_file(path: str | Path) -> Scenario:
@@ -13,94 +16,92 @@ def parse_scenario_file(path: str | Path) -> Scenario:
 def parse_scenario_text(text: str, source_path: str | Path | None = None) -> Scenario:
     scenario = Scenario(source_path=Path(source_path) if source_path else None)
     current: Aircraft | None = None
-    pending_pseudo_pilot = ""
+    pending_pilots: list[SourceRecord] = []
+
+    def global_pilots() -> None:
+        for record in pending_pilots:
+            record.index = len(scenario.pseudo_pilots)
+            scenario.pseudo_pilots.append(record.text.strip().split(":", 1)[1])
+        pending_pilots.clear()
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
+        record = SourceRecord("unknown", raw_line)
+        scenario.source_records.append(record)
         if not line:
+            record.kind = "blank"
             continue
 
         if line.startswith("@"):
             current = _parse_aircraft_position(line)
-            current.pseudo_pilot = pending_pseudo_pilot
-            pending_pseudo_pilot = ""
-            current.raw_lines.append(raw_line)
+            for pilot in pending_pilots:
+                pilot.owner = current
+                current.source_records.append(pilot)
+                current.pseudo_pilot = pilot.text.strip().split(":", 1)[1]
+            pending_pilots.clear()
             scenario.aircraft.append(current)
+            record.kind = "position"
+        elif line.startswith("PSEUDOPILOT:"):
+            # A pilot directive starts a possible prefix for the NEXT aircraft.
+            # Keep every occurrence even if no aircraft follows it.
+            current = None
+            record.kind = "pseudo"
+            record.values = {"pseudo_pilot": line.split(":", 1)[1]}
+            pending_pilots.append(record)
             continue
-
-        if line.startswith("PSEUDOPILOT:"):
-            pending_pseudo_pilot = line.split(":", 1)[1]
-            if current is None and _is_initial_global_pseudo_pilot(scenario):
-                scenario.pseudo_pilots.append(pending_pseudo_pilot)
-            continue
-
-        if line.startswith("AIRPORT_ALT:"):
-            pending_pseudo_pilot = ""
-            scenario.airport_altitude = _float_or_none(line.split(":", 1)[1])
-            continue
-
-        if line.startswith("METAR:"):
-            pending_pseudo_pilot = ""
-            scenario.metar = line.split(":", 1)[1]
-            continue
-
-        if line.startswith("ILS"):
-            pending_pseudo_pilot = ""
-            threshold = _parse_threshold(line)
-            if threshold:
-                scenario.thresholds.append(threshold)
+        elif line.startswith(("AIRPORT_ALT:", "METAR:", "ILS", "HOLDING:")):
+            global_pilots()
+            current = None
+            if line.startswith("AIRPORT_ALT:"):
+                record.kind = "airport"
+                scenario.airport_altitude = _float_or_none(line.split(":", 1)[1])
+                record.values = {"airport_altitude": scenario.airport_altitude}
+            elif line.startswith("METAR:"):
+                record.kind = "metar"
+                scenario.metar = line.split(":", 1)[1]
+                record.values = {"metar": scenario.metar}
+            elif line.startswith("ILS"):
+                record.item = _parse_threshold(line)
+                if record.item is not None:
+                    record.kind = "threshold"
+                    scenario.thresholds.append(record.item)
             else:
-                scenario.unknown_lines.append(raw_line)
-            continue
+                record.item = _parse_hold(line)
+                if record.item is not None:
+                    record.kind = "hold"
+                    scenario.holds.append(record.item)
+            if record.item is not None:
+                record.values = asdict(record.item)
+        elif current is not None:
+            if line.startswith("$FP"):
+                record.kind = "fp"
+                current.flight_plan = _parse_flight_plan(line)
+            elif line.startswith("SIMDATA:"):
+                record.kind = "sim"
+                current.sim_data = line
+            elif line.startswith("$ROUTE:"):
+                record.kind = "route"
+                current.editor_route = line.split(":", 1)[1].strip()
+            elif line.startswith("DELAY:"):
+                record.kind = "delay"
+                _apply_delay(current, line)
 
-        if line.startswith("HOLDING:"):
-            pending_pseudo_pilot = ""
-            hold = _parse_hold(line)
-            if hold:
-                scenario.holds.append(hold)
-            else:
-                scenario.unknown_lines.append(raw_line)
-            continue
-
-        if line.startswith("$FP"):
-            if current is None:
-                scenario.unknown_lines.append(raw_line)
-                continue
-            current.flight_plan = _parse_flight_plan(line)
+        if current is not None:
+            record.owner = current
+            current.source_records.append(record)
             current.raw_lines.append(raw_line)
-            continue
+            record.values = aircraft_values(current)
+        if record.kind == "unknown":
+            unknown = current.unknown_lines if current is not None else scenario.unknown_lines
+            record.index = len(unknown)
+            unknown.append(raw_line)
 
-        if line.startswith("SIMDATA:"):
-            if current is None:
-                scenario.unknown_lines.append(raw_line)
-                continue
-            current.sim_data = line
-            current.raw_lines.append(raw_line)
-            continue
-
-        if line.startswith("$ROUTE:"):
-            if current is None:
-                scenario.unknown_lines.append(raw_line)
-                continue
-            current.editor_route = line.split(":", 1)[1].strip()
-            current.raw_lines.append(raw_line)
-            continue
-
-        if line.startswith("DELAY:"):
-            if current is None:
-                scenario.unknown_lines.append(raw_line)
-                continue
-            _apply_delay(current, line)
-            current.raw_lines.append(raw_line)
-            continue
-
-        if current is None:
-            pending_pseudo_pilot = ""
-            scenario.unknown_lines.append(raw_line)
-        else:
-            current.unknown_lines.append(raw_line)
-            current.raw_lines.append(raw_line)
-
+    global_pilots()
+    for aircraft in scenario.aircraft:
+        aircraft.original_values = aircraft_values(aircraft)
+    scenario.original_values = {
+        "airport_altitude": scenario.airport_altitude, "metar": scenario.metar,
+    }
     return scenario
 
 
@@ -121,18 +122,6 @@ def _parse_aircraft_position(line: str) -> Aircraft:
         trailing_flag=_part(parts, 9),
     )
     return aircraft
-
-
-def _is_initial_global_pseudo_pilot(scenario: Scenario) -> bool:
-    return (
-        not scenario.aircraft
-        and scenario.airport_altitude is None
-        and not scenario.metar
-        and not scenario.thresholds
-        and not scenario.holds
-        and not scenario.unknown_lines
-        and not scenario.pseudo_pilots
-    )
 
 
 def _parse_flight_plan(line: str) -> FlightPlan:
@@ -162,13 +151,10 @@ def _parse_threshold(line: str) -> Threshold | None:
     if len(parts) < 5:
         return None
     try:
-        return Threshold(
-            name=parts[0],
-            latitude1=float(parts[1]),
-            longitude1=float(parts[2]),
-            latitude2=float(parts[3]),
-            longitude2=float(parts[4]),
-        )
+        coordinates = [float(part) for part in parts[1:5]]
+        if not all(math.isfinite(value) for value in coordinates):
+            return None
+        return Threshold(parts[0], *coordinates)
     except ValueError:
         return None
 
@@ -185,6 +171,8 @@ def _parse_hold(line: str) -> Hold | None:
 
 def _apply_delay(aircraft: Aircraft, line: str) -> None:
     parts = line.split(":")
+    aircraft.delay_min = None
+    aircraft.delay_max = None
     if len(parts) >= 2:
         aircraft.delay_min = _int_or_default(parts[1], 0)
     if len(parts) >= 3:
@@ -198,7 +186,7 @@ def _part(parts: list[str], index: int) -> str:
 def _int_or_default(value: str, default: int) -> int:
     try:
         return int(float(value.strip()))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -209,6 +197,7 @@ def _float_or_default(value: str, default: float) -> float:
 
 def _float_or_none(value: str) -> float | None:
     try:
-        return float(value.strip())
+        result = float(value.strip())
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None

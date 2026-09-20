@@ -1,0 +1,10 @@
+AIRPORT_ALT:not-a-number
+ILS_BROKEN:bad:coordinates
+HOLDING:FIX:bad:turn
+UNSUPPORTED:GLOBAL
+@N:BROKEN:1234:1:bad:coordinates:bad:speed:heading:0:EXTRA
+$FPBROKEN:custom
+SIMDATA:BROKEN
+DELAY:not-a-delay:also-bad:EXTRA
+$ROUTE:
+UNSUPPORTED:BROKEN

@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.0
+
+Round-trip safety release.
+
+Implemented:
+
+- Retains ordered source records, duplicates, unknown content, extra fields, and untouched malformed records during export.
+- Preserves all `PSEUDOPILOT` placements and global records between aircraft sections.
+- Keeps absent and empty optional records distinct, and preserves single-value versus range delays.
+- Patches only edited fields; aircraft renames update matching `$FP` and `SIMDATA` callsigns while preserving existing mismatches.
+- Makes no-op aircraft dialog saves preserve original values, including raw headings and missing flight plans/delays.
+- Writes, flushes, synchronizes, and closes a temporary file before atomic destination replacement; failed saves retain the existing file and active source path.
+- Adds uncommon-record fixtures, parse-export-parse stability checks, copy/delete/create coverage, offscreen editor tests, and injected save-failure tests.
+- Documents intentional formatting normalization and the save/preservation contract in README.
+
+Verified:
+
+- All 63 parser, exporter, sector, save-failure, and offscreen UI tests pass.
+- The Windows sandbox test run used inherited permissions for pytest temporary directories to avoid its restrictive-directory ACL issue.
+
 ## v1.1.0
 
 Saveable scenario export release.

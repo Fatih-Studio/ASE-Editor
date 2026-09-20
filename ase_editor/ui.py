@@ -1538,30 +1538,45 @@ class AircraftEditorDialog(QDialog):
         self.remarks.setPlainText(aircraft.flight_plan.remarks)
         self.delay_min.setValue(aircraft.delay_min or 0)
         self.delay_max.setValue(aircraft.delay_max or 0)
+        self._loaded_editor_values = self._editor_values()
+
+    def _editor_values(self) -> dict[str, object]:
+        return {
+            "callsign": self.callsign.text().strip().upper(),
+            "flight_plan.aircraft_type": self.aircraft_type.currentText().strip().upper(),
+            "squawk": self.squawk.text().strip(),
+            "mode_c": "1" if self.mode_c.isChecked() else "0",
+            "latitude": self.latitude.value(),
+            "longitude": self.longitude.value(),
+            "altitude": self.altitude.value(),
+            "ground_speed": self.ground_speed.value(),
+            "heading_raw": self.heading.value(),
+            "flight_plan.departure": self.departure.text().strip().upper(),
+            "flight_plan.arrival": self.arrival.text().strip().upper(),
+            "flight_plan.flight_type": self.flight_type.currentText()[:1].upper(),
+            "flight_plan.route_text": self.route_text.toPlainText().strip().upper(),
+            "flight_plan.departure_time": self.departure_time.text().strip(),
+            "flight_plan.enroute_time": self.enroute_time.text().strip(),
+            "flight_plan.cruise_altitude": self.cruise_altitude.text().strip(),
+            "flight_plan.cruise_speed": self.cruise_speed.text().strip(),
+            "flight_plan.remarks": self.remarks.toPlainText().strip(),
+            "delay_min": self.delay_min.value(),
+            "delay_max": self.delay_max.value(),
+        }
 
     def _save(self) -> None:
         aircraft = self.aircraft
-        aircraft.callsign = self.callsign.text().strip().upper()
-        aircraft.flight_plan.callsign = aircraft.callsign
-        aircraft.flight_plan.aircraft_type = self.aircraft_type.currentText().strip().upper()
-        aircraft.squawk = self.squawk.text().strip()
-        aircraft.mode_c = "1" if self.mode_c.isChecked() else "0"
-        aircraft.latitude = self.latitude.value()
-        aircraft.longitude = self.longitude.value()
-        aircraft.altitude = self.altitude.value()
-        aircraft.ground_speed = self.ground_speed.value()
-        aircraft.heading_raw = self.heading.value()
-        aircraft.flight_plan.departure = self.departure.text().strip().upper()
-        aircraft.flight_plan.arrival = self.arrival.text().strip().upper()
-        aircraft.flight_plan.flight_type = self.flight_type.currentText()[:1].upper()
-        aircraft.flight_plan.route_text = self.route_text.toPlainText().strip().upper()
-        aircraft.flight_plan.departure_time = self.departure_time.text().strip()
-        aircraft.flight_plan.enroute_time = self.enroute_time.text().strip()
-        aircraft.flight_plan.cruise_altitude = self.cruise_altitude.text().strip()
-        aircraft.flight_plan.cruise_speed = self.cruise_speed.text().strip()
-        aircraft.flight_plan.remarks = self.remarks.toPlainText().strip()
-        aircraft.delay_min = self.delay_min.value()
-        aircraft.delay_max = self.delay_max.value()
+        for name, value in self._editor_values().items():
+            if value == self._loaded_editor_values[name]:
+                continue
+            if name == "callsign":
+                aircraft.original_values.setdefault("callsign", aircraft.callsign)
+            if name.startswith("flight_plan."):
+                setattr(aircraft.flight_plan, name.split(".", 1)[1], value)
+            else:
+                setattr(aircraft, name, value)
+        if aircraft.delay_max is not None and aircraft.delay_min is None:
+            aircraft.delay_min = self.delay_min.value()
         self.aircraft_saved.emit(aircraft)
         self.close()
 
@@ -2529,7 +2544,7 @@ class MainWindow(QMainWindow):
             return
         copied = deepcopy(self.selected)
         copied.callsign = self._unique_callsign(callsign.strip().upper())
-        copied.flight_plan.callsign = copied.callsign
+        copied.original_values.setdefault("callsign", self.selected.callsign)
         copied.latitude = self.canvas.center_lat
         copied.longitude = self.canvas.center_lon
         self.scenario.aircraft.append(copied)
