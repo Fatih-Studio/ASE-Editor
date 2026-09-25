@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
+import re
 
 
 @dataclass(slots=True)
@@ -113,6 +115,53 @@ class Threshold:
     longitude2: float
 
 
+class ThresholdValidationError(ValueError):
+    def __init__(self, errors: dict[str, str]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(errors.values()))
+
+
+def validate_threshold(
+    values: dict[str, object], thresholds: list[Threshold], existing: Threshold | None = None,
+) -> dict[str, object]:
+    """Validate a creation or partial edit without changing the source object."""
+    fields = ("name", "latitude1", "longitude1", "latitude2", "longitude2")
+    if values.keys() - set(fields):
+        raise ValueError("Unknown threshold field")
+    result = {name: getattr(existing, name) if existing is not None else None for name in fields}
+    changes = {name: value for name, value in values.items() if value != result[name]}
+    if existing is not None and not changes:
+        return result
+    result.update(changes)
+    errors = {}
+    if existing is None or "name" in changes:
+        name = str(result["name"] or "").strip().upper()
+        result["name"] = name
+        if not re.fullmatch(r"ILS(?:0[1-9]|[12][0-9]|3[0-6])[LCR]?", name):
+            errors["name"] = "Use ILS01–ILS36, optionally followed by L, C, or R."
+    if any(item is not existing and item.name.strip().casefold() == str(result["name"]).casefold()
+           for item in thresholds):
+        errors["name"] = "A threshold with this name already exists."
+    for name in fields[1:]:
+        limit = 90 if name.startswith("latitude") else 180
+        try:
+            value = float(result[name])
+            if not math.isfinite(value) or not -limit <= value <= limit:
+                raise ValueError
+            if existing is None or name in changes:
+                result[name] = round(value, 7)
+        except (ValueError, TypeError, OverflowError):
+            errors[name] = f"Enter a finite decimal number between −{limit} and {limit}."
+    if not any(name in errors for name in fields[1:]):
+        if (round(result["latitude1"], 7), round(result["longitude1"], 7)) == (
+            round(result["latitude2"], 7), round(result["longitude2"], 7)
+        ):
+            errors["latitude2"] = "Threshold and far end must be different positions."
+    if errors:
+        raise ThresholdValidationError(errors)
+    return result
+
+
 @dataclass(slots=True)
 class Hold:
     fix: str
@@ -144,6 +193,26 @@ class Scenario:
     unknown_lines: list[str] = field(default_factory=list)
     source_records: list[SourceRecord] = field(default_factory=list, repr=False, compare=False)
     original_values: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
+
+    def create_threshold(self, name: str, latitude1: object, longitude1: object,
+                         latitude2: object, longitude2: object) -> Threshold:
+        values = validate_threshold(dict(name=name, latitude1=latitude1, longitude1=longitude1,
+                                         latitude2=latitude2, longitude2=longitude2), self.thresholds)
+        threshold = Threshold(**values)
+        self.thresholds.append(threshold)
+        return threshold
+
+    def update_threshold(self, threshold: Threshold, **changes: object) -> Threshold:
+        if not any(item is threshold for item in self.thresholds):
+            raise ValueError("Threshold no longer belongs to this scenario")
+        values = validate_threshold(changes, self.thresholds, threshold)
+        for name, value in values.items():
+            if value != getattr(threshold, name):
+                setattr(threshold, name, value)
+        return threshold
+
+    def delete_threshold(self, threshold: Threshold) -> None:
+        self.thresholds[:] = [item for item in self.thresholds if item is not threshold]
 
     def all_geo_points(self) -> list[tuple[float, float]]:
         points: list[tuple[float, float]] = []

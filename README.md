@@ -4,7 +4,7 @@ Native Python desktop prototype for editing EuroScope scenario situations. The a
 
 The current implementation follows the local PRD, and the source of truth is now the Python app in `ase_editor/`.
 
-Current version: `v1.2.0`.
+Current version: `v1.3.0`.
 
 Version log: see `CHANGELOG.md`.
 
@@ -25,7 +25,7 @@ python -m ase_editor.build_sector_database indonesia
 
 ## Current Position
 
-We are at `v1.2.0`, the round-trip safety release.
+We are at `v1.3.0`, the ILS threshold authoring release.
 
 Implemented checklist:
 
@@ -43,6 +43,7 @@ Implemented checklist:
 - [x] `View > Info Sector` dialog for structured sector `[INFO]` metadata editing.
 - [x] Aircraft workflows for select, search, copy, delete, drag-to-move, and click-to-place new aircraft.
 - [x] Aircraft editor popup for callsign, position, squawk, altitude, speed, heading, route, delay, and flight-plan fields.
+- [x] ILS threshold popup with integrated list management, creation/editing, canvas selection, validation, and deletion.
 - [x] Structure-preserving EuroScope scenario `.txt` export and atomic save/save-as workflows.
 - [x] Parse-export-parse coverage for uncommon records, optional-record absence, duplicate records, safe callsign edits, and save failures.
 - [x] Layer toggles, diagram visibility controls, collapsed traffic categories, last-view restore, and settings persistence.
@@ -51,7 +52,7 @@ Implemented checklist:
 Still placeholder / not done:
 
 - [ ] FlightPlanDB integration.
-- [ ] Real ILS threshold creation.
+- [ ] Broader aircraft, route-token, and scenario-metadata validation.
 - [ ] Sector geometry editing.
 - [ ] `.sct` export/write-back.
 - [ ] Broader tests for theme editing, sector info saving, and database rebuild output.
@@ -92,12 +93,32 @@ Intentional export normalization:
 
 Saving first serializes in memory, then writes and flushes a temporary file in the destination directory, synchronizes it to disk, closes it, and replaces the destination. A failure before replacement leaves the existing destination unchanged. Temporary files are removed where possible, the error is shown, and failed Save As does not change the active scenario path. This does not provide backups or crash recovery.
 
+## ILS Threshold Authoring
+
+Click **ILS Threshold** in the toolbar to open the popup. Its left-hand list contains existing thresholds; the right-hand form contains only the threshold name, threshold latitude/longitude, and far-end latitude/longitude. Fields are read-only until you press the **pen** icon to edit or the **+** icon at the upper right to create a new threshold. The active pen or plus stays highlighted with inverted colors. Opening this dialog cancels aircraft placement mode.
+
+During creation or editing, use the **check** icon at the lower right to apply changes or the **cross** to discard the draft. Both keep the popup open and return the fields to read-only mode. The list and filter are disabled during a draft. Icon actions have tooltips and accessible names; the old text buttons below the list and in the footer are removed.
+
+Each coordinate panel has a **crosshair** icon for choosing its position from the map. It is enabled only while creating or editing. Click it to temporarily hide the popup, then left-click the map to fill that panel's latitude and longitude to seven decimal places. You can pan and zoom before choosing. **Escape** cancels the pick and returns to the unchanged draft. Picking does not move aircraft or apply the draft; press the check icon to commit the threshold changes.
+
+The configuration popup uses a compact dark navy layout with cyan accents, a filterable threshold list, and separate coordinate panels. The defined count and coordinate summaries come from the current scenario. Filtering out the selected threshold clears selection so Edit/Delete cannot act on a hidden result.
+
+Authored records use the far-end coordinate form from `WIHH_example.txt`:
+
+```text
+ILS<runway name>:<threshold latitude>:<threshold longitude>:<far end latitude>:<far end longitude>
+ILS06:-6.2722343:106.8787898:-6.2609290:106.9036165
+```
+
+Names are trimmed and uppercased; new or renamed thresholds must use `ILS01`–`ILS36`, optionally followed by `L`, `C`, or `R`. Names must be unique ignoring case. Coordinates must be finite, with latitude within ±90 and longitude within ±180. Authored coordinates use seven decimal places, and the two positions must differ at that precision. Validation errors appear beside the fields and leave the scenario unchanged.
+
+Click a popup list row to view its fields and center the canvas on its midpoint, or click its visible canvas segment to select without moving the map. Double-click a canvas threshold to open its configuration, or use **I**; the pen must still be pressed to unlock editing. The **trash** icon removes the selected threshold immediately and is disabled during editing. Aircraft take priority where canvas targets overlap. Hidden thresholds remain available in the popup list. Close the popup and use the existing **Save Scenario** / **Save Scenario As** actions to persist changes to disk.
+
+Editing preserves the existing object and source record, including extra fields and untouched coordinate precision. The cross or **Escape** in the popup cancels the current draft and restores the prior selection; **Escape** in read-only mode closes the popup. Closing the window also discards any unsaved draft. Changes already applied with the check or trash remain in the scenario. Unchanged saves preserve the original data. Unchanged legacy names remain editable, though actual edits must pass coordinate and duplicate validation. The heading-only form (`ILS<runway name>:<threshold latitude>:<threshold longitude>:<runway heading>`) remains preserved as raw text and is not shown in the authoring list. Renaming a threshold does not rewrite aircraft route text. Endpoint dragging and undo/redo are deferred.
+
 ## Future Updates
 
-### v1.3: Real Authoring Tools
-
-- Replace the ILS threshold placeholder with a real creation/edit workflow.
-- Add validation feedback for aircraft, thresholds, route tokens, and scenario metadata.
+ILS threshold authoring shipped in v1.3. Broader validation for aircraft, route tokens, and scenario metadata remains future work.
 
 ### v1.4: FlightPlanDB / Route Tools
 
@@ -127,6 +148,7 @@ Saving first serializes in memory, then writes and flushes a temporary file in t
 - `tests/test_round_trip.py` and `tests/fixtures/` - uncommon-record, structural preservation, and repeated export coverage.
 - `tests/test_save_safety.py` - atomic replacement and injected disk-failure coverage.
 - `tests/test_round_trip_ui.py` - no-op editing, callsign changes, copy/delete, and failed-save UI coverage.
+- `tests/test_thresholds.py` and `tests/test_threshold_ui.py` - threshold validation, create/edit/delete, preservation, selection, shortcuts, and save/reload coverage.
 - `tests/test_ui_smoke.py` - offscreen PySide6 smoke tests for the current UI workflow.
 - `asset/` - icons used by aircraft, vehicles, toolbar actions, and Qt styles.
 - `WIHH_example.txt` - startup scenario sample and next export reference.

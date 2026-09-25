@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .exporter import write_scenario_file
-from .models import Aircraft, FlightPlan, Scenario
+from .models import Aircraft, FlightPlan, Scenario, Threshold, ThresholdValidationError
 from .parser import parse_scenario_file
 from .sector import (
     SectorColor,
@@ -451,8 +451,12 @@ class StripCategoryHeader(QFrame):
 class RadarCanvas(QWidget):
     aircraft_selected = Signal(object)
     aircraft_double_clicked = Signal(object)
+    threshold_selected = Signal(object)
+    threshold_double_clicked = Signal(object)
     aircraft_moved = Signal(object)
     map_clicked = Signal(float, float)
+    coordinate_picked = Signal(float, float)
+    coordinate_pick_cancelled = Signal()
     cursor_geo_changed = Signal(float, float)
     range_changed = Signal(float)
     diagram_visibility_changed = Signal()
@@ -478,6 +482,7 @@ class RadarCanvas(QWidget):
         self._region_brush_cache: dict[str, QColor] = {}
         self._label_pen_cache: dict[str, QColor] = {}
         self.selected: Aircraft | None = None
+        self.selected_threshold: Threshold | None = None
         self.show_routes = True
         self.show_sector_lines = True
         self.show_fixes = True
@@ -494,6 +499,7 @@ class RadarCanvas(QWidget):
         self._drag_start_pos: QPoint | None = None
         self._dragging_aircraft: Aircraft | None = None
         self.aircraft_placement_mode = False
+        self.coordinate_pick_label: str | None = None
         self.icons = self._load_icons()
 
     def set_data(
@@ -520,6 +526,8 @@ class RadarCanvas(QWidget):
         self._region_brush_cache.clear()
         self._label_pen_cache.clear()
         self.selected = selected
+        if not any(item is self.selected_threshold for item in scenario.thresholds):
+            self.selected_threshold = None
         self.fit_to_data()
 
     def set_sector_colors(self, sector_colors: dict[str, SectorColor]) -> None:
@@ -531,6 +539,14 @@ class RadarCanvas(QWidget):
 
     def set_selected(self, aircraft: Aircraft | None) -> None:
         self.selected = aircraft
+        if aircraft is not None:
+            self.selected_threshold = None
+        self.update()
+
+    def set_selected_threshold(self, threshold: Threshold | None) -> None:
+        self.selected_threshold = threshold
+        if threshold is not None:
+            self.selected = None
         self.update()
 
     def set_aircraft_placement_mode(self, enabled: bool) -> None:
@@ -540,6 +556,27 @@ class RadarCanvas(QWidget):
         else:
             self.unsetCursor()
         self.update()
+
+    def set_coordinate_pick_mode(self, label: str | None) -> None:
+        self.coordinate_pick_label = label
+        self._pending_drag_aircraft = None
+        self._dragging_aircraft = None
+        self._drag_start_pos = None
+        self._last_mouse = None
+        self._panning = False
+        if label is not None:
+            self.setCursor(Qt.CrossCursor)
+            self.setFocus()
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self.coordinate_pick_label is not None and event.key() == Qt.Key_Escape:
+            self.coordinate_pick_cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def set_show_routes(self, show_routes: bool) -> None:
         self.show_routes = show_routes
@@ -630,6 +667,12 @@ class RadarCanvas(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         self._draw_targets(painter)
         self._draw_scope_overlay(painter)
+        if self.coordinate_pick_label is not None:
+            painter.fillRect(12, self.height() - 48, self.width() - 24, 36, QColor("#183849"))
+            painter.setFont(QFont("Segoe UI", 10))
+            painter.setPen(QColor("#71dff2"))
+            painter.drawText(24, self.height() - 25,
+                             f"Click map to choose {self.coordinate_pick_label}. Esc to cancel.")
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         index = RANGE_PRESETS_NM.index(self.range_nm)
@@ -662,6 +705,11 @@ class RadarCanvas(QWidget):
             self._panning = True
             return
         if event.button() == Qt.LeftButton:
+            if self.coordinate_pick_label is not None:
+                lat, lon = self.screen_to_geo(event.position())
+                self._last_mouse = None
+                self.coordinate_picked.emit(lat, lon)
+                return
             if self.aircraft_placement_mode:
                 lat, lon = self.screen_to_geo(event.position())
                 self.map_clicked.emit(lat, lon)
@@ -669,7 +717,9 @@ class RadarCanvas(QWidget):
                 return
             aircraft = self._aircraft_at(event.position())
             self.selected = aircraft
+            self.selected_threshold = None if aircraft else self._threshold_at(event.position())
             self.aircraft_selected.emit(aircraft)
+            self.threshold_selected.emit(self.selected_threshold)
             if aircraft:
                 self._pending_drag_aircraft = aircraft
                 self._drag_start_pos = event.position().toPoint()
@@ -720,13 +770,25 @@ class RadarCanvas(QWidget):
         self._last_mouse = None
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self.coordinate_pick_label is not None:
+            self.mousePressEvent(event)
+            return
         if event.button() == Qt.LeftButton:
             aircraft = self._aircraft_at(event.position())
             if aircraft:
                 self.selected = aircraft
+                self.selected_threshold = None
                 self.aircraft_selected.emit(aircraft)
                 self.aircraft_double_clicked.emit(aircraft)
                 self.update()
+            else:
+                threshold = self._threshold_at(event.position())
+                if threshold is not None:
+                    self.selected = None
+                    self.selected_threshold = threshold
+                    self.threshold_selected.emit(threshold)
+                    self.threshold_double_clicked.emit(threshold)
+                    self.update()
             return
 
         if event.button() == Qt.RightButton:
@@ -893,8 +955,12 @@ class RadarCanvas(QWidget):
         for threshold in self.scenario.thresholds:
             start = self.geo_to_screen(threshold.latitude1, threshold.longitude1)
             end = self.geo_to_screen(threshold.latitude2, threshold.longitude2)
-            painter.setPen(QPen(QColor("#4cd7f6"), 2))
+            selected = threshold is self.selected_threshold
+            painter.setPen(QPen(QColor("#ffffff" if selected else "#4cd7f6"), 3 if selected else 2))
             painter.drawLine(start, end)
+            if selected:
+                painter.drawEllipse(start, 5, 5)
+                painter.drawEllipse(end, 5, 5)
             if RADAR_TEXT_ENABLED:
                 painter.drawText(end + QPointF(5, -5), threshold.name)
 
@@ -1070,6 +1136,23 @@ class RadarCanvas(QWidget):
             or line.intersects(QLineF(max_x, max_y, min_x, max_y))[0] == bounded
             or line.intersects(QLineF(min_x, max_y, min_x, min_y))[0] == bounded
         )
+
+    def _threshold_at(self, point: QPointF) -> Threshold | None:
+        if not self.view_layers.get("Thresholds", True):
+            return None
+        nearest: tuple[float, Threshold] | None = None
+        for threshold in self.scenario.thresholds:
+            start = self.geo_to_screen(threshold.latitude1, threshold.longitude1)
+            end = self.geo_to_screen(threshold.latitude2, threshold.longitude2)
+            dx, dy = end.x() - start.x(), end.y() - start.y()
+            length_squared = dx * dx + dy * dy
+            fraction = max(0.0, min(1.0, ((point.x() - start.x()) * dx +
+                                         (point.y() - start.y()) * dy) / length_squared)) if length_squared else 0.0
+            distance = math.hypot(point.x() - start.x() - fraction * dx,
+                                  point.y() - start.y() - fraction * dy)
+            if distance <= 8 and (nearest is None or distance < nearest[0]):
+                nearest = (distance, threshold)
+        return nearest[1] if nearest else None
 
     def _aircraft_at(self, point: QPointF) -> Aircraft | None:
         nearest: tuple[float, Aircraft] | None = None
@@ -1351,6 +1434,404 @@ class RadarCanvas(QWidget):
         if aircraft.wake_category.upper().startswith("L"):
             return 20.0
         return DEFAULT_AIRCRAFT_LENGTH_METERS
+
+
+class ThresholdIconButton(QPushButton):
+    """Small vector action with matching light/dark icons for active states."""
+
+    def __init__(self, action: str, tooltip: str, checkable: bool = False) -> None:
+        super().__init__()
+        paths = {
+            "add": '<path d="M12 5v14M5 12h14"/>',
+            "edit": '<path d="m4 16-1 5 5-1L20 8l-4-4L4 16Zm9-9 4 4"/>',
+            "delete": '<path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/>',
+            "save": '<path d="m4 12 5 5L20 6"/>',
+            "cancel": '<path d="m6 6 12 12M18 6 6 18"/>',
+            "pick": '<circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>'
+                    '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
+        }
+        self._icons = []
+        for color in ("#63d9ed", "#082638"):
+            svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">'
+                   f'<g fill="none" stroke="{color}" stroke-width="1.8" stroke-linecap="round" '
+                   f'stroke-linejoin="round">{paths[action]}</g></svg>')
+            pixmap = QPixmap()
+            pixmap.loadFromData(svg.encode("utf-8"), "SVG")
+            pixmap.setDevicePixelRatio(2)
+            self._icons.append(QIcon(pixmap))
+        self.setObjectName("ThresholdAction")
+        self.setToolTip(tooltip)
+        self.setAccessibleName(tooltip)
+        self.setCheckable(checkable)
+        self.setAutoDefault(False)
+        self.setFixedSize(36, 34)
+        self.setIconSize(QSize(22, 22))
+        self.toggled.connect(self._update_icon)
+        self.pressed.connect(self._update_icon)
+        self.released.connect(self._update_icon)
+        self._update_icon()
+
+    def _update_icon(self, _checked: bool = False) -> None:
+        self.setIcon(self._icons[int(self.isChecked() or self.underMouse() or self.isDown())])
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        super().enterEvent(event)
+        self._update_icon()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        super().leaveEvent(event)
+        self._update_icon()
+
+
+class ThresholdEditorDialog(QDialog):
+    threshold_saved = Signal(object)
+    threshold_selected = Signal(object)
+    threshold_deleted = Signal(object)
+    coordinate_pick_requested = Signal(str)
+
+    def __init__(self, scenario: Scenario, threshold: Threshold | None = None,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.scenario = scenario
+        self.threshold = threshold
+        self.mode = "view"
+        self._return_threshold = threshold
+        self.setWindowTitle("ILS Threshold Configuration")
+        self.setModal(True)
+        self.setMinimumSize(840, 460)
+        self.resize(960, 520)
+        self.setObjectName("ThresholdConfiguration")
+        self.setStyleSheet(THRESHOLD_DIALOG_STYLESHEET)
+        layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QFrame()
+        header.setObjectName("ThresholdHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+        icon = QLabel()
+        icon.setPixmap(QPixmap(str(ASSET_DIR / "toolbar-ils-threshold.png")).scaled(
+            18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        icon.setObjectName("ThresholdIcon")
+        header_layout.addWidget(icon)
+        title = QLabel("ILS Threshold Configuration")
+        title.setObjectName("ThresholdTitle")
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        source = QLabel(scenario.source_path.name if scenario.source_path else "UNTITLED SCENARIO")
+        source.setObjectName("ThresholdSource")
+        header_layout.addWidget(source)
+        layout.addWidget(header)
+        body = QHBoxLayout()
+        body.setContentsMargins(16, 16, 16, 16)
+        body.setSpacing(20)
+        layout.addLayout(body, 1)
+        manager = QFrame()
+        manager.setObjectName("ThresholdManager")
+        manager.setFixedWidth(270)
+        manager_layout = QVBoxLayout(manager)
+        manager_layout.setContentsMargins(0, 0, 0, 0)
+        manager_layout.setSpacing(10)
+        list_header = QHBoxLayout()
+        list_title = QLabel("ILS THRESHOLDS")
+        list_title.setObjectName("ThresholdSectionTitle")
+        self.threshold_count = QLabel()
+        self.threshold_count.setObjectName("ThresholdCount")
+        list_header.addWidget(list_title)
+        list_header.addStretch(1)
+        list_header.addWidget(self.threshold_count)
+        manager_layout.addLayout(list_header)
+        self.threshold_search = QLineEdit()
+        self.threshold_search.setObjectName("ThresholdSearch")
+        self.threshold_search.setMinimumHeight(34)
+        self.threshold_search.setPlaceholderText("Filter ILS / runway…")
+        self.threshold_search.textChanged.connect(self._filter_thresholds)
+        manager_layout.addWidget(self.threshold_search)
+        self.threshold_list = QListWidget()
+        self.threshold_list.setObjectName("ThresholdList")
+        self.threshold_list.setSpacing(3)
+        self.threshold_list.currentItemChanged.connect(self._select_row)
+        manager_layout.addWidget(self.threshold_list, 1)
+        self.empty_list_label = QLabel("No thresholds defined")
+        self.empty_list_label.setObjectName("ThresholdHint")
+        manager_layout.addWidget(self.empty_list_label)
+        self.add_threshold_button = ThresholdIconButton("add", "Create new ILS threshold", checkable=True)
+        self.edit_threshold_button = ThresholdIconButton("edit", "Edit selected ILS threshold", checkable=True)
+        self.delete_threshold_button = ThresholdIconButton("delete", "Delete selected ILS threshold")
+        self.add_threshold_button.clicked.connect(self.new_threshold)
+        self.edit_threshold_button.clicked.connect(self.edit_selected)
+        self.delete_threshold_button.clicked.connect(self.delete_selected)
+        body.addWidget(manager)
+        detail_panel = QWidget()
+        detail_panel.setMinimumWidth(518)
+        form = QVBoxLayout(detail_panel)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(14)
+        body.addWidget(detail_panel, 1)
+        self.fields: dict[str, QLineEdit] = {}
+        self.errors: dict[str, QLabel] = {}
+        self._loaded_text: dict[str, str] = {}
+
+        def add_field(container, name, label, placeholder):
+            if label:
+                caption = QLabel(label)
+                caption.setObjectName("ThresholdFieldLabel")
+                container.addWidget(caption)
+            edit = QLineEdit()
+            edit.setMinimumHeight(36)
+            edit.setPlaceholderText(placeholder)
+            edit.setObjectName(f"threshold_{name}")
+            text = str(getattr(threshold, name)) if threshold is not None else ""
+            edit.setText(text)
+            self.fields[name] = edit
+            self._loaded_text[name] = text
+            container.addWidget(edit)
+            error = QLabel()
+            error.setObjectName("ThresholdError")
+            error.setWordWrap(True)
+            error.setMinimumHeight(30)
+            error.hide()
+            self.errors[name] = error
+            container.addWidget(error)
+
+        identifier = QVBoxLayout()
+        identifier.setSpacing(6)
+        identifier_header = QHBoxLayout()
+        caption = QLabel("THRESHOLD NAME / IDENTIFIER")
+        caption.setObjectName("ThresholdFieldLabel")
+        identifier_header.addWidget(caption)
+        identifier_header.addStretch(1)
+        for button in (self.edit_threshold_button, self.delete_threshold_button, self.add_threshold_button):
+            identifier_header.addWidget(button)
+        identifier.addLayout(identifier_header)
+        add_field(identifier, "name", "", "ILS06")
+        form.addLayout(identifier)
+        self.map_pick_buttons: dict[str, ThresholdIconButton] = {}
+        for title, suffix, latitude, longitude in (
+            ("●  THRESHOLD COORDINATES", "1", "-6.2722343", "106.8787898"),
+            ("●  FAR END COORDINATES", "2", "-6.2609290", "106.9036165"),
+        ):
+            group = QFrame()
+            group.setObjectName("ThresholdCoordinateCard")
+            card = QVBoxLayout(group)
+            card.setContentsMargins(12, 12, 12, 12)
+            card.setSpacing(10)
+            heading = QHBoxLayout()
+            caption = QLabel(title)
+            caption.setObjectName("ThresholdCoordinateTitle" if suffix == "1" else "ThresholdFarEndTitle")
+            heading.addWidget(caption)
+            heading.addStretch(1)
+            units = QLabel("DECIMAL DEGREES")
+            units.setObjectName("ThresholdUnits")
+            heading.addWidget(units)
+            endpoint = "threshold" if suffix == "1" else "far end"
+            pick_button = ThresholdIconButton("pick", f"Choose {endpoint} coordinates from map", checkable=True)
+            pick_button.setFixedSize(28, 28)
+            pick_button.setIconSize(QSize(18, 18))
+            pick_button.clicked.connect(lambda _checked=False, suffix=suffix: self.request_coordinate_pick(suffix))
+            self.map_pick_buttons[suffix] = pick_button
+            heading.addWidget(pick_button)
+            card.addLayout(heading)
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            for name, label, example in ((f"latitude{suffix}", "LATITUDE", latitude),
+                                         (f"longitude{suffix}", "LONGITUDE", longitude)):
+                column = QVBoxLayout()
+                column.setSpacing(6)
+                add_field(column, name, label, example)
+                row.addLayout(column, 1)
+            card.addLayout(row)
+            form.addWidget(group)
+        form.addStretch(1)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.cancel_button = ThresholdIconButton("cancel", "Cancel changes")
+        self.cancel_button.clicked.connect(self.cancel_changes)
+        self.save_button = ThresholdIconButton("save", "Save changes")
+        self.save_button.clicked.connect(self._save)
+        actions.addWidget(self.cancel_button)
+        actions.addWidget(self.save_button)
+        form.addLayout(actions)
+        footer = QFrame()
+        footer.setObjectName("ThresholdFooter")
+        buttons = QHBoxLayout(footer)
+        buttons.setContentsMargins(18, 12, 18, 12)
+        self.status_label = QLabel("Changes apply to this scenario. Save the scenario to write to disk.")
+        self.status_label.setObjectName("ThresholdHint")
+        self.status_label.setWordWrap(True)
+        buttons.addWidget(self.status_label, 1)
+        buttons.addStretch(1)
+        layout.addWidget(footer)
+        self.refresh_thresholds(threshold)
+        shortcut = QShortcut(QKeySequence.Delete, self.threshold_list, self.delete_selected)
+        shortcut.setContext(Qt.WidgetShortcut)
+
+    def _update_controls(self) -> None:
+        editing = self.mode != "view"
+        row = self.threshold_list.currentItem()
+        selected = row is not None and not row.isHidden()
+        for field in self.fields.values():
+            field.setReadOnly(not editing)
+        self.threshold_list.setEnabled(not editing)
+        self.threshold_search.setEnabled(not editing)
+        self.add_threshold_button.setChecked(self.mode == "create")
+        self.edit_threshold_button.setChecked(self.mode == "edit")
+        self.add_threshold_button.setEnabled(self.mode != "edit")
+        self.edit_threshold_button.setVisible(self.threshold is not None)
+        self.delete_threshold_button.setVisible(self.threshold is not None)
+        self.edit_threshold_button.setEnabled(selected and self.mode != "create")
+        self.delete_threshold_button.setEnabled(selected and not editing)
+        self.save_button.setVisible(editing)
+        self.cancel_button.setVisible(editing)
+        self.save_button.setEnabled(editing)
+        self.save_button.setDefault(editing)
+        for button in self.map_pick_buttons.values():
+            button.setEnabled(editing)
+        self.status_label.setText({
+            "view": "Select an ILS, then press the pen to edit or + to create.",
+            "create": "Creating a new ILS. Check to save, cross to cancel.",
+            "edit": "Editing this ILS. Check to save, cross to discard changes.",
+        }[self.mode])
+
+    def request_coordinate_pick(self, suffix: str) -> None:
+        if self.mode == "view" or suffix not in self.map_pick_buttons:
+            return
+        self.map_pick_buttons[suffix].setChecked(True)
+        self.coordinate_pick_requested.emit(suffix)
+
+    def apply_picked_coordinates(self, suffix: str, latitude: float, longitude: float) -> None:
+        if self.mode == "view" or suffix not in self.map_pick_buttons:
+            return
+        for name, value in ((f"latitude{suffix}", latitude), (f"longitude{suffix}", longitude)):
+            self.fields[name].setText(f"{value:.7f}")
+            self.errors[name].hide()
+
+    def cancel_changes(self) -> None:
+        if self.mode == "view":
+            return
+        target = self._return_threshold
+        self.mode = "view"
+        self._load_threshold(target)
+        self.sync_selection(target)
+        self.threshold_selected.emit(target)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key_Escape and self.mode != "view":
+            self.cancel_changes()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def refresh_thresholds(self, selected: Threshold | None) -> None:
+        self.threshold_list.blockSignals(True)
+        self.threshold_list.clear()
+        for threshold in self.scenario.thresholds:
+            row = QListWidgetItem(f"{threshold.name}\n{threshold.latitude1:.5f}, {threshold.longitude1:.5f}")
+            row.setData(Qt.UserRole, threshold)
+            row.setToolTip(f"{threshold.name}\nThreshold: {threshold.latitude1}, {threshold.longitude1}\n"
+                           f"Far end: {threshold.latitude2}, {threshold.longitude2}")
+            self.threshold_list.addItem(row)
+        self.threshold_list.blockSignals(False)
+        self.threshold_count.setText(f"{len(self.scenario.thresholds)} DEFINED")
+        self._filter_thresholds()
+        self.sync_selection(selected)
+
+    def _filter_thresholds(self) -> None:
+        query = self.threshold_search.text().strip().casefold()
+        visible = 0
+        for index in range(self.threshold_list.count()):
+            row = self.threshold_list.item(index)
+            matches = query in row.data(Qt.UserRole).name.casefold()
+            row.setHidden(not matches)
+            visible += matches
+        self.empty_list_label.setText("No matching thresholds" if self.scenario.thresholds else "No thresholds defined")
+        self.empty_list_label.setVisible(visible == 0)
+        current = self.threshold_list.currentItem()
+        if current is not None and current.isHidden():
+            self.threshold_list.setCurrentRow(-1)
+
+    def sync_selection(self, selected: Threshold | None) -> None:
+        self.threshold_list.blockSignals(True)
+        index = next((i for i in range(self.threshold_list.count())
+                      if self.threshold_list.item(i).data(Qt.UserRole) is selected), -1)
+        self.threshold_list.setCurrentRow(index)
+        self.threshold_list.blockSignals(False)
+        self._update_controls()
+
+    def _load_threshold(self, threshold: Threshold | None) -> None:
+        self.threshold = threshold
+        for name, edit in self.fields.items():
+            text = str(getattr(threshold, name)) if threshold is not None else ""
+            edit.setText(text)
+            self._loaded_text[name] = text
+            self.errors[name].hide()
+
+    def _select_row(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        threshold = current.data(Qt.UserRole) if current is not None else None
+        self._load_threshold(threshold)
+        self.sync_selection(threshold)
+        self.threshold_selected.emit(threshold)
+
+    def new_threshold(self) -> None:
+        if self.mode != "view":
+            self._update_controls()
+            return
+        self._return_threshold = self.threshold
+        self.threshold_search.clear()
+        self.mode = "create"
+        self._load_threshold(None)
+        self.sync_selection(None)
+        self.threshold_selected.emit(None)
+        self.fields["name"].setFocus()
+
+    def edit_selected(self) -> None:
+        if self.mode != "view":
+            self._update_controls()
+            return
+        row = self.threshold_list.currentItem()
+        if row is not None and not row.isHidden():
+            self._load_threshold(row.data(Qt.UserRole))
+            self._return_threshold = self.threshold
+            self.mode = "edit"
+            self._update_controls()
+            self.fields["name"].setFocus()
+
+    def delete_selected(self) -> None:
+        if self.mode != "view":
+            return
+        row = self.threshold_list.currentItem()
+        if row is None or row.isHidden():
+            return
+        threshold = row.data(Qt.UserRole)
+        self.scenario.delete_threshold(threshold)
+        self._load_threshold(None)
+        self.refresh_thresholds(None)
+        self.threshold_deleted.emit(threshold)
+
+    def _save(self) -> None:
+        if self.mode == "view":
+            return
+        for error in self.errors.values():
+            error.hide()
+        values = {name: edit.text() for name, edit in self.fields.items()
+                  if self.threshold is None or edit.text() != self._loaded_text[name]}
+        try:
+            if self.threshold is None:
+                threshold = self.scenario.create_threshold(**values)
+            else:
+                threshold = self.scenario.update_threshold(self.threshold, **values)
+        except ThresholdValidationError as exc:
+            for name, message in exc.errors.items():
+                self.errors[name].setText(message)
+                self.errors[name].show()
+            self.fields[next(iter(exc.errors))].setFocus()
+            return
+        self.mode = "view"
+        self._return_threshold = threshold
+        self._load_threshold(threshold)
+        self.refresh_thresholds(threshold)
+        self.threshold_saved.emit(threshold)
 
 
 class AircraftEditorDialog(QDialog):
@@ -1906,6 +2387,10 @@ class MainWindow(QMainWindow):
         self.sector_info = SectorInfo()
         self.sector_path: Path | None = None
         self.selected: Aircraft | None = None
+        self.selected_threshold: Threshold | None = None
+        self.threshold_dialog: ThresholdEditorDialog | None = None
+        self._threshold_map_pick: tuple[ThresholdEditorDialog, str] | None = None
+        self._map_pick_controls: list[tuple[object, bool]] = []
         self.strip_rows: list[ClickableFrame] = []
         self.strip_category_rows: dict[str, tuple[StripCategoryHeader, list[ClickableFrame]]] = {}
         self.collapsed_strip_categories: set[str] = set()
@@ -1954,6 +2439,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._threshold_map_pick is not None:
+            self._finish_threshold_map_pick(restore_dialog=False)
+            if self.threshold_dialog is not None:
+                self.threshold_dialog.reject()
         self._save_last_view()
         super().closeEvent(event)
 
@@ -2082,7 +2571,7 @@ class MainWindow(QMainWindow):
 
         self.ils_threshold_action = QAction(QIcon(str(ASSET_DIR / "toolbar-ils-threshold.png")), "ILS Threshold", self)
         self.ils_threshold_action.setToolTip("ILS Threshold")
-        self.ils_threshold_action.triggered.connect(self.add_ils_threshold_placeholder)
+        self.ils_threshold_action.triggered.connect(self.new_threshold)
 
         toolbar.addAction(self.new_aircraft_action)
         toolbar.addAction(self.ils_threshold_action)
@@ -2389,17 +2878,21 @@ class MainWindow(QMainWindow):
     def _wire_events(self) -> None:
         self.canvas.aircraft_selected.connect(lambda aircraft: self.select_aircraft(aircraft, snap_to_target=False))
         self.canvas.aircraft_double_clicked.connect(self.open_aircraft_editor)
+        self.canvas.threshold_selected.connect(lambda threshold: self.select_threshold(threshold, snap_to_target=False))
+        self.canvas.threshold_double_clicked.connect(self.open_threshold_editor)
         self.canvas.aircraft_moved.connect(self._aircraft_changed)
         self.canvas.map_clicked.connect(self._place_new_aircraft)
+        self.canvas.coordinate_picked.connect(self._threshold_coordinates_picked)
+        self.canvas.coordinate_pick_cancelled.connect(self._cancel_threshold_map_pick)
         self.canvas.cursor_geo_changed.connect(self._cursor_changed)
         self.canvas.range_changed.connect(self._range_changed)
         self.canvas.diagram_visibility_changed.connect(self._save_diagram_visibility)
         self.canvas.view_changed.connect(self._save_last_view)
 
     def _install_shortcuts(self) -> None:
-        QShortcut(QKeySequence.Delete, self, self.delete_selected_aircraft)
+        QShortcut(QKeySequence.Delete, self, self.delete_selected_item)
         QShortcut(QKeySequence("R"), self, self.canvas.fit_to_data)
-        QShortcut(QKeySequence("I"), self, self.open_aircraft_editor)
+        QShortcut(QKeySequence("I"), self, self.edit_selected_item)
 
     def _load_startup_data(self) -> None:
         self.load_database("Indonesia", refresh=False, warn_if_missing=False)
@@ -2460,6 +2953,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open Scenario", f"Could not load scenario:\n{exc}")
             return
         self._classify_targets()
+        if self.threshold_dialog is not None:
+            self.threshold_dialog.reject()
+        self.selected_threshold = None
+        self.canvas.set_selected_threshold(None)
         self.selected = self.scenario.aircraft[0] if self.scenario.aircraft else None
         self._refresh_all()
 
@@ -2573,15 +3070,133 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self._save_last_view()
 
-    def add_ils_threshold_placeholder(self) -> None:
-        QMessageBox.information(
-            self,
-            "ILS Threshold",
-            "ILS threshold authoring is reserved for the next implementation slice.",
-        )
+    def new_threshold(self) -> None:
+        self._show_threshold_editor(self.selected_threshold)
+
+    def open_threshold_editor(self, threshold: Threshold | None = None) -> None:
+        target = threshold if threshold is not None else self.selected_threshold
+        if target is not None:
+            self._show_threshold_editor(target)
+
+    def _show_threshold_editor(self, threshold: Threshold | None) -> None:
+        self._set_aircraft_placement_mode(False)
+        if self.threshold_dialog is not None:
+            self.threshold_dialog.reject()
+        dialog = ThresholdEditorDialog(self.scenario, threshold, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.threshold_saved.connect(self._threshold_changed)
+        dialog.threshold_selected.connect(self.select_threshold)
+        dialog.threshold_deleted.connect(lambda _threshold: self.select_threshold(None, snap_to_target=False))
+        dialog.coordinate_pick_requested.connect(self._start_threshold_map_pick)
+        dialog.finished.connect(lambda _result: self._forget_threshold_dialog(dialog))
+        self.threshold_dialog = dialog
+        dialog.open()
+
+    def _forget_threshold_dialog(self, dialog: ThresholdEditorDialog) -> None:
+        if self.threshold_dialog is dialog:
+            self._finish_threshold_map_pick(restore_dialog=False)
+            self.threshold_dialog = None
+
+    def _start_threshold_map_pick(self, suffix: str) -> None:
+        dialog = self.threshold_dialog
+        if dialog is None or dialog.mode == "view" or suffix not in dialog.map_pick_buttons:
+            return
+        if self._threshold_map_pick is not None:
+            return
+        self._set_aircraft_placement_mode(False)
+        self._threshold_map_pick = (dialog, suffix)
+        controls = [self.menuBar(), self.scenario_toolbar, self.traffic_dock,
+                    *self.findChildren(QAction), *self.findChildren(QShortcut)]
+        self._map_pick_controls = [(control, control.isEnabled()) for control in controls]
+        for control, _enabled in self._map_pick_controls:
+            control.setEnabled(False)
+        dialog.hide()
+        label = "threshold coordinates" if suffix == "1" else "far-end coordinates"
+        self.canvas.set_coordinate_pick_mode(label)
+        self.activateWindow()
+        self.canvas.setFocus()
+
+    def _finish_threshold_map_pick(self, restore_dialog: bool = True) -> None:
+        pending = self._threshold_map_pick
+        if pending is None:
+            return
+        self._threshold_map_pick = None
+        self.canvas.set_coordinate_pick_mode(None)
+        for control, enabled in self._map_pick_controls:
+            control.setEnabled(enabled)
+        self._map_pick_controls = []
+        dialog, suffix = pending
+        dialog.map_pick_buttons[suffix].setChecked(False)
+        if restore_dialog and dialog is self.threshold_dialog:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            dialog.fields[f"latitude{suffix}"].setFocus()
+
+    def _threshold_coordinates_picked(self, latitude: float, longitude: float) -> None:
+        if self._threshold_map_pick is None:
+            return
+        dialog, suffix = self._threshold_map_pick
+        dialog.apply_picked_coordinates(suffix, latitude, longitude)
+        self._finish_threshold_map_pick()
+
+    def _cancel_threshold_map_pick(self) -> None:
+        self._finish_threshold_map_pick()
+
+    def _threshold_changed(self, threshold: Threshold) -> None:
+        self._refresh_thresholds()
+        self.select_threshold(threshold, snap_to_target=False)
+
+    def _refresh_thresholds(self) -> None:
+        if self.threshold_dialog is not None:
+            self.threshold_dialog.refresh_thresholds(self.selected_threshold)
+
+    def _sync_threshold_selection(self) -> None:
+        if self.threshold_dialog is not None:
+            self.threshold_dialog.sync_selection(self.selected_threshold)
+
+    def select_threshold(self, threshold: Threshold | None, snap_to_target: bool = True) -> None:
+        self.selected_threshold = threshold
+        if threshold is not None:
+            self.selected = None
+            self.canvas.set_selected(None)
+            self._refresh_strips()
+            if snap_to_target:
+                self.canvas.center_lat = (threshold.latitude1 + threshold.latitude2) / 2
+                self.canvas.center_lon = (threshold.longitude1 + threshold.longitude2) / 2
+                self._save_last_view()
+        self.canvas.set_selected_threshold(threshold)
+        self._sync_threshold_selection()
+
+    def delete_selected_threshold(self) -> None:
+        if self.selected_threshold is None:
+            return
+        self.scenario.delete_threshold(self.selected_threshold)
+        self.select_threshold(None, snap_to_target=False)
+        self._refresh_thresholds()
+
+    def delete_selected_item(self) -> None:
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+            return
+        if self.selected_threshold is not None:
+            self.delete_selected_threshold()
+        else:
+            self.delete_selected_aircraft()
+
+    def edit_selected_item(self) -> None:
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+            return
+        if self.selected_threshold is not None:
+            self.open_threshold_editor()
+        else:
+            self.open_aircraft_editor()
 
     def select_aircraft(self, aircraft: Aircraft | None, snap_to_target: bool = True) -> None:
         self.selected = aircraft
+        if aircraft is not None:
+            self.selected_threshold = None
+            self.canvas.set_selected_threshold(None)
+            self._refresh_thresholds()
         if aircraft is not None and snap_to_target:
             self.canvas.center_lat = aircraft.latitude
             self.canvas.center_lon = aircraft.longitude
@@ -2607,6 +3222,9 @@ class MainWindow(QMainWindow):
 
     def _aircraft_changed(self, aircraft: Aircraft) -> None:
         self.selected = aircraft
+        self.selected_threshold = None
+        self.canvas.set_selected(aircraft)
+        self._refresh_thresholds()
         self._classify_target(aircraft)
         self.canvas.update()
         self._refresh_strips()
@@ -2632,6 +3250,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_range_nm(RANGE_PRESETS_NM[index])
 
     def _refresh_all(self) -> None:
+        if not any(item is self.selected_threshold for item in self.scenario.thresholds):
+            self.selected_threshold = None
         self.canvas.set_data(
             self.scenario,
             self.sector_points,
@@ -2643,6 +3263,8 @@ class MainWindow(QMainWindow):
         )
         self._refresh_strips()
         self._refresh_metrics()
+        self.canvas.set_selected_threshold(self.selected_threshold)
+        self._refresh_thresholds()
 
     def _refresh_metrics(self) -> None:
         active = len(self.scenario.aircraft)
@@ -2970,6 +3592,91 @@ def _flight_type_label(value: str) -> str:
     if normalized == "S":
         return "SVFR"
     return "IFR"
+
+
+THRESHOLD_DIALOG_STYLESHEET = """
+QWidget {
+    font-family: "Segoe UI";
+    font-size: 12px;
+    color: #c6d5e0;
+}
+QDialog#ThresholdConfiguration { background: #071724; }
+QFrame#ThresholdHeader, QFrame#ThresholdFooter {
+    background: #1a2c3b;
+    border: 0;
+}
+QFrame#ThresholdHeader { border-bottom: 1px solid #243c4c; }
+QFrame#ThresholdFooter { border-top: 1px solid #243c4c; }
+QFrame#ThresholdManager { background: transparent; border: 0; }
+QLabel { background: transparent; border: 0; }
+QLabel#ThresholdTitle { color: #e1ebf3; font-size: 16px; font-weight: 700; }
+QLabel#ThresholdIcon {
+    color: #39d0ec; background: #061b2b; padding: 3px 7px;
+    border: 1px solid #285267; border-radius: 3px; font-size: 18px;
+}
+QLabel#ThresholdSource {
+    color: #4cccb0; font-family: "Consolas"; font-size: 11px;
+}
+QLabel#ThresholdSectionTitle, QLabel#ThresholdFieldLabel {
+    font-family: "Consolas"; color: #9db1bf; font-size: 11px; font-weight: 700;
+}
+QLabel#ThresholdCount {
+    color: #a8bdcb; background: #182c3b; padding: 3px 5px;
+    border-radius: 2px; font-family: "Consolas"; font-size: 10px;
+}
+QLineEdit {
+    color: #dce9f1; background: #03131f;
+    border: 1px solid #0e2433; border-radius: 3px;
+    padding: 8px 10px; font-family: "Consolas"; font-size: 14px;
+    selection-background-color: #1e596e; selection-color: #ffffff;
+}
+QLineEdit:focus { border-color: #36bbd6; }
+QLineEdit[readOnly="true"] { border-color: #0e2433; color: #9bb1bf; }
+QLineEdit#threshold_name { color: #40cee9; font-weight: 700; }
+QLineEdit#ThresholdSearch { font-family: "Segoe UI"; font-size: 12px; padding: 7px 9px; }
+QListWidget#ThresholdList {
+    background: transparent; border: 0; outline: 0;
+    font-family: "Consolas"; font-size: 12px;
+}
+QListWidget#ThresholdList::item {
+    background: #05131f; color: #a8bdcd;
+    border: 1px solid #0f2433; border-left: 3px solid #233d4b;
+    border-radius: 4px; padding: 12px 10px; margin-bottom: 4px;
+}
+QListWidget#ThresholdList::item:hover { background: #102737; border-color: #285367; }
+QListWidget#ThresholdList::item:selected {
+    background: #173345; color: #55d7ee; border: 1px solid #235168;
+    border-left: 3px solid #42d9f3;
+}
+QFrame#ThresholdCoordinateCard {
+    background: #0d2130; border: 1px solid #132c3d; border-radius: 6px;
+}
+QLabel#ThresholdCoordinateTitle, QLabel#ThresholdFarEndTitle {
+    color: #36c9e5; font-family: "Consolas"; font-size: 11px; font-weight: 700;
+}
+QLabel#ThresholdFarEndTitle { color: #49cfae; }
+QLabel#ThresholdUnits { color: #7f99aa; font-family: "Consolas"; font-size: 10px; }
+QLabel#ThresholdError { color: #f0a592; font-size: 11px; }
+QLabel#ThresholdHint { color: #91a9b9; font-size: 11px; }
+QPushButton {
+    background: #1c3243; color: #c1d4e1; border: 1px solid #263f50;
+    border-radius: 3px; padding: 8px 12px; font-size: 12px; font-weight: 600;
+}
+QPushButton:hover { background: #27495d; border-color: #4294af; }
+QPushButton:pressed { background: #113345; }
+QPushButton:disabled { color: #536d7c; background: #112332; border-color: #1a3040; }
+QPushButton#ThresholdAction {
+    background: #102a3b; border: 1px solid #285165; border-radius: 4px; padding: 4px;
+}
+QPushButton#ThresholdAction:hover, QPushButton#ThresholdAction:pressed, QPushButton#ThresholdAction:checked {
+    background: #70dced; border-color: #9ceafa;
+}
+QPushButton#ThresholdAction:disabled { background: #112332; border-color: #1a3040; }
+QScrollBar:vertical { background: #071724; width: 8px; margin: 0; }
+QScrollBar::handle:vertical { background: #294657; min-height: 24px; border-radius: 3px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+"""
 
 
 DIALOG_STYLESHEET = """

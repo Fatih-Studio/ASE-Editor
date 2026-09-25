@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.3.0
+
+ILS threshold authoring release.
+
+Implemented:
+
+- Replaces the ILS toolbar placeholder with a compact dark dialog for threshold name, threshold coordinates, and far-end coordinates, with inline errors and Create/Save/Cancel actions.
+- Keeps the ILS Thresholds list inside the toolbar popup, alongside the form. Saves keep the popup open for further edits; the main sidebar remains dedicated to traffic.
+- Uses upper-right plus, pen, and trash icons and lower-right check/cross actions instead of text buttons. Fields stay read-only until plus or pen is pressed; active creation/editing uses an inverted highlight, and cancel restores the original values and selection.
+- Adds a map-pick crosshair to each coordinate panel. Picking temporarily hides the popup, fills only the requested coordinate pair, and leaves changes in the draft until confirmed. Escape returns without changing the draft; scenario replacement and window closure clear pick mode.
+- Restyles the compact popup with a navy header/footer, cyan accents, filterable threshold cards, defined count, and coordinate panels. Validation feedback remains readable when resizing.
+- Synchronizes threshold list and canvas selection, with segment and endpoint highlighting and double-click editing.
+- Routes Delete and I shortcuts to the selected aircraft or threshold while preserving dialog text entry; hidden thresholds remain manageable from the list.
+- Adds model-level validation and atomic in-memory creation/editing, including runway-name rules, duplicate detection, coordinate bounds, finite values, seven-decimal precision, and distinct endpoints.
+- Preserves object identity, source-record position, extra fields, untouched precision, legacy names, malformed records, and heading-only records during far-end threshold authoring.
+- Reuses structure-preserving export and atomic scenario saves. Threshold edits and deletion refresh without refitting the map.
+
+Verified:
+
+- All 112 parser, exporter, sector, save-safety, model, and offscreen UI tests pass, including 49 new threshold tests.
+- Inspected the rendered popup and main-window layout and exercised create/edit/save/reload/delete/export against the WIHH sample; original nonblank records were preserved.
+- The Windows sandbox test run used workspace-local temporary directories with inherited permissions to avoid the existing pytest directory ACL issue.
+
+Deferred:
+
+- Heading-form authoring, endpoint dragging, undo/redo, broader validation, and automatic route-reference updates.
+
 ## v1.2.0
 
 Round-trip safety release.
