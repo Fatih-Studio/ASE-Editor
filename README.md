@@ -4,7 +4,7 @@ Native Python desktop prototype for editing EuroScope scenario situations. The a
 
 The current implementation follows the local PRD, and the source of truth is now the Python app in `ase_editor/`.
 
-Current version: `v1.3.0`.
+Current version: `v1.4.0`.
 
 Version log: see `CHANGELOG.md`.
 
@@ -25,7 +25,7 @@ python -m ase_editor.build_sector_database indonesia
 
 ## Current Position
 
-We are at `v1.3.0`, the ILS threshold authoring release.
+We are at `v1.4.0`, the FlightPlanDB routes and checkpoint suggestions release.
 
 Implemented checklist:
 
@@ -44,6 +44,7 @@ Implemented checklist:
 - [x] Aircraft workflows for select, search, copy, delete, drag-to-move, and click-to-place new aircraft.
 - [x] Aircraft editor popup for callsign, position, squawk, altitude, speed, heading, route, delay, and flight-plan fields.
 - [x] ILS threshold popup with integrated list management, creation/editing, canvas selection, validation, and deletion.
+- [x] FlightPlanDB generation, compact flight-plan route import, and editable simulation checkpoint suggestions.
 - [x] Structure-preserving EuroScope scenario `.txt` export and atomic save/save-as workflows.
 - [x] Parse-export-parse coverage for uncommon records, optional-record absence, duplicate records, safe callsign edits, and save failures.
 - [x] Layer toggles, diagram visibility controls, collapsed traffic categories, last-view restore, and settings persistence.
@@ -51,7 +52,6 @@ Implemented checklist:
 
 Still placeholder / not done:
 
-- [ ] FlightPlanDB integration.
 - [ ] Broader aircraft, route-token, and scenario-metadata validation.
 - [ ] Sector geometry editing.
 - [ ] `.sct` export/write-back.
@@ -116,14 +116,38 @@ Click a popup list row to view its fields and center the canvas on its midpoint,
 
 Editing preserves the existing object and source record, including extra fields and untouched coordinate precision. The cross or **Escape** in the popup cancels the current draft and restores the prior selection; **Escape** in read-only mode closes the popup. Closing the window also discards any unsaved draft. Changes already applied with the check or trash remain in the scenario. Unchanged saves preserve the original data. Unchanged legacy names remain editable, though actual edits must pass coordinate and duplicate validation. The heading-only form (`ILS<runway name>:<threshold latitude>:<threshold longitude>:<runway heading>`) remains preserved as raw text and is not shown in the authoring list. Renaming a threshold does not rewrite aircraft route text. Endpoint dragging and undo/redo are deferred.
 
+## FlightPlanDB Routes and Checkpoints
+
+For one-time setup, install the dependencies with `python -m pip install -r requirements.txt`. Create a `.env` file beside this README (copy `.env.example` if needed), then add your key:
+
+```dotenv
+FLIGHTPLANDB_API_KEY=your-api-key-here
+```
+
+Save the file and launch with `python -m ase_editor`. The app automatically reads this project-local file at startup, including when launched from another working directory. Restart the app after changing the key. `.env` and `.env.*` are excluded from Git; `.env.example` contains only an empty template. Keep real keys out of tracked files and shared copies of the project.
+
+Existing environment variables take precedence over `.env`, so a permanent Windows user environment variable is also supported. To use a temporary terminal override:
+
+```powershell
+$env:FLIGHTPLANDB_API_KEY = "<your-api-key>"
+python -m ase_editor
+```
+
+Open an aircraft editor, enter different four-letter departure and arrival ICAOs, and click **FlightPlanDB**. Generation uses the current editor fields, including unsaved edits. Cruise altitude accepts feet (`35000`) or a flight level (`FL350`, `F350`); cruise airspeed accepts knots (`420`, `N0420`). Leave these fields blank to use the service defaults. Mach and metric notation are not supported in this release.
+
+The app generates a remote plan and fetches its nodes, then fills the **FlighPlan** draft with compact airway text, for example `WIII DCT KASAL G461 SBR W33 RABOL DCT WADD`. Direct legs use `DCT`; unsupported track/procedure compression retains the individual fixes. A status message reports the airports, waypoint count, distance and request quota when available. Generation creates a plan on FlightPlanDB even if you later discard the local draft. Requests are not automatically retried; a timeout may occur after a remote plan has already been created. Authentication, quota, network and invalid-response failures leave your drafts intact.
+
+**FlighPlan** is the complete filed route in `$FP`. **Checkpoints** is the separate sequence stored in `$ROUTE` that the scenario aircraft follows from its current position. Importing a flight-plan route preserves existing checkpoints. The radar prefers nonempty `$ROUTE` and continues resolving identifiers against the loaded sector database; generated fixes absent from that database remain in the text but are not drawn.
+
+After generation, click **Suggest checkpoints**. The preview proposes a downstream waypoint from the nearest route segment, using heading to distinguish nearby segments. It uses the current editor position and heading, and shows the distance from the suggested segment. Review the first-checkpoint selector and the editable remaining fixes. Each selector entry includes its sequence number so repeated identifiers can be selected separately. Changing the first checkpoint rebuilds the preview. The old checkpoints are shown as reference; you can manually replace the destination airport ending with your approach, for example `ELNIR KOMIT ILS24`. The app does not infer runways or automatically join approach routes.
+
+**Apply checkpoints** copies the preview into the checkpoint draft; **Cancel** leaves that draft unchanged. **Save** in the aircraft editor applies both drafts to the aircraft. Close or Escape discards unsaved edits. Use **Save Scenario** / **Save Scenario As** to write the scenario file. Editing the generation inputs or filed route invalidates checkpoint suggestions; if edited during a request, its result is discarded. The editor remains responsive while generating, with duplicate generation and Save temporarily disabled.
+
+Using data from the [Flight Plan Database](https://flightplandatabase.com). See its [API documentation](https://flightplandatabase.com/dev/api) for authentication, generation, units, and request limits. FlightPlanDB data is for flight simulation.
+
 ## Future Updates
 
-ILS threshold authoring shipped in v1.3. Broader validation for aircraft, route tokens, and scenario metadata remains future work.
-
-### v1.4: FlightPlanDB / Route Tools
-
-- Connect route lookup or import.
-- Normalize route tokens and insert generated route text into aircraft flight plans.
+ILS threshold authoring shipped in v1.3; FlightPlanDB generation and checkpoint suggestions shipped in v1.4. Route search, runway selection, automatic approach merging, additional navigation data loading, and broader validation remain future work.
 
 ### v1.5: Sector Editing
 
@@ -138,6 +162,8 @@ ILS threshold authoring shipped in v1.3. Broader validation for aircraft, route 
 - `ase_editor/parser.py` - EuroScope scenario `.txt` parser.
 - `ase_editor/records.py` - shared record field maps and original-value snapshots.
 - `ase_editor/exporter.py` - structure-preserving EuroScope scenario `.txt` serializer and atomic file writer.
+- `ase_editor/flightplandb.py` - API client, input normalization, typed generation results, and safe error handling.
+- `ase_editor/route_tools.py` - compact airway formatting and position/heading-based checkpoint suggestions.
 - `ase_editor/sector.py` - full sector parsing helpers for `.sct`-style points, lines, regions, labels, and colors.
 - `ase_editor/sector_database.py` - SQLite sector database build/load helpers.
 - `ase_editor/build_sector_database.py` - CLI entry point for rebuilding packaged sector databases.
@@ -150,6 +176,7 @@ ILS threshold authoring shipped in v1.3. Broader validation for aircraft, route 
 - `tests/test_round_trip_ui.py` - no-op editing, callsign changes, copy/delete, and failed-save UI coverage.
 - `tests/test_thresholds.py` and `tests/test_threshold_ui.py` - threshold validation, create/edit/delete, preservation, selection, shortcuts, and save/reload coverage.
 - `tests/test_ui_smoke.py` - offscreen PySide6 smoke tests for the current UI workflow.
+- `tests/test_flightplandb.py`, `tests/test_route_tools.py`, and `tests/test_flightplandb_ui.py` - mocked API, route conversion, checkpoint preview, and asynchronous editor coverage.
 - `asset/` - icons used by aircraft, vehicles, toolbar actions, and Qt styles.
 - `WIHH_example.txt` - startup scenario sample and next export reference.
 - `data/sector/indonesia.sqlite3` - packaged Indonesia sector database loaded by the app.

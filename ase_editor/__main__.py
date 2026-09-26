@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 def main() -> int:
+    # Use the project file even when launched from a different working directory.
+    # Explicit process/user environment variables retain precedence.
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False, encoding="utf-8-sig")
     try:
         from .ui import run
     except ModuleNotFoundError as exc:

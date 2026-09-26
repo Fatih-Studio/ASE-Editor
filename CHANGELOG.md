@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.4.0
+
+FlightPlanDB routes and checkpoint suggestions release.
+
+Implemented:
+
+- Replaces the aircraft editor FlightPlanDB placeholder with asynchronous route generation using the current departure, arrival, and optional cruise fields.
+- Reads `FLIGHTPLANDB_API_KEY` from the environment or a Git-ignored project `.env` file loaded at startup; existing environment variables take precedence. Generates a remote plan, fetches its route nodes, and handles authentication, quota, timeout, network, and malformed-response errors without exposing credentials.
+- Imports compact airway text into the `$FP` route draft and displays a route summary. Existing simulation checkpoints remain intact until explicitly edited.
+- Adds an editable `$ROUTE` field and a checkpoint preview with a position/heading-based starting-point suggestion, sequence-indexed waypoint selection, and manual approach-ending edits.
+- Keeps generation and checkpoint application in editor drafts until Save. Closing discards drafts; late responses cannot overwrite changed inputs or routes. Application-owned workers survive editor closure safely.
+- Documents environment setup, remote plan creation, route/checkpoint behavior, and the existing sector-resolution limits.
+
+Verified:
+
+- All 190 tests pass, including 78 new client, route-conversion, startup environment, and offscreen UI tests. HTTP responses are mocked; no real API credentials or network calls are used by the tests.
+- Inspected the rendered editor and checkpoint preview. Generation status remains visible above Save while scrolling.
+- Used workspace-local temporary directories with inherited permissions for the Windows sandbox test run, avoiding the existing pytest directory ACL issue.
+
 ## v1.3.0
 
 ILS threshold authoring release.

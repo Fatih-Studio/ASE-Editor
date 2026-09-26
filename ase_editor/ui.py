@@ -7,8 +7,9 @@ from pathlib import Path
 import math
 import re
 import sys
+from threading import Event
 
-from PySide6.QtCore import QLineF, QPoint, QPointF, QRegularExpression, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRegularExpression, QSettings, QSize, Qt, Signal, Slot, QThread
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -60,6 +61,8 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .exporter import write_scenario_file
+from .flightplandb import FlightPlanDBClient, FlightPlanDBError, GeneratedRoute, generation_inputs
+from .route_tools import checkpoint_text, suggest_checkpoint
 from .models import Aircraft, FlightPlan, Scenario, Threshold, ThresholdValidationError
 from .parser import parse_scenario_file
 from .sector import (
@@ -1834,12 +1837,89 @@ class ThresholdEditorDialog(QDialog):
         self.threshold_saved.emit(threshold)
 
 
+class FlightPlanDBWorker(QThread):
+    """Application-owned worker: closing an editor cannot destroy a running thread."""
+    completed = Signal(object)
+
+    def __init__(self, inputs: dict) -> None:
+        super().__init__(QApplication.instance())
+        self.inputs = inputs
+        self.cancel = Event()
+        self.finished.connect(self.deleteLater)
+        QApplication.instance().aboutToQuit.connect(self.shutdown)
+
+    def run(self) -> None:
+        try:
+            result = FlightPlanDBClient(cancel=self.cancel).generate_route(**self.inputs)
+        except FlightPlanDBError as error:
+            result = error
+        except Exception:
+            # Never expose exception text, request objects, or credentials to the UI.
+            result = FlightPlanDBError("unexpected", "Route generation failed. Your drafts were preserved.")
+        if not self.cancel.is_set():
+            self.completed.emit(result)
+
+    @Slot()
+    def shutdown(self) -> None:
+        self.cancel.set()
+        self.wait()
+
+
+class CheckpointPreviewDialog(QDialog):
+    def __init__(self, result: GeneratedRoute, existing: str, latitude: float,
+                 longitude: float, heading: float, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Suggest simulation checkpoints")
+        self.setMinimumSize(500, 400)
+        layout = QVBoxLayout(self)
+        start, distance = suggest_checkpoint(result.nodes, latitude, longitude, heading)
+        summary = QLabel(f"Suggested first checkpoint: {result.nodes[start].ident}\n"
+                         f"Distance from suggested route segment: {distance:.1f} NM. Review before applying.")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        layout.addWidget(QLabel("Existing checkpoints (reference)"))
+        self.existing = QPlainTextEdit(existing)
+        self.existing.setReadOnly(True)
+        layout.addWidget(self.existing)
+        layout.addWidget(QLabel("First checkpoint"))
+        self.start_checkpoint = QComboBox()
+        for index, node in enumerate(result.nodes):
+            self.start_checkpoint.addItem(f"{index + 1}. {node.ident}", index)
+        self.start_checkpoint.setCurrentIndex(start)
+        layout.addWidget(self.start_checkpoint)
+        help_text = QLabel("Edit the remaining checkpoints below. You can replace the airport ending "
+                           "with your approach, for example ELNIR KOMIT ILS24. Changing the first "
+                           "checkpoint rebuilds this preview.")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        self.route_text = QPlainTextEdit(checkpoint_text(result.nodes, start))
+        layout.addWidget(self.route_text)
+        self.start_checkpoint.currentIndexChanged.connect(
+            lambda index: self.route_text.setPlainText(checkpoint_text(result.nodes, index)))
+        buttons = QHBoxLayout()
+        self.apply_button = QPushButton("Apply checkpoints")
+        self.apply_button.setObjectName("DialogPrimaryButton")
+        self.apply_button.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addStretch(1)
+        buttons.addWidget(self.apply_button)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+
 class AircraftEditorDialog(QDialog):
     aircraft_saved = Signal(object)
 
     def __init__(self, aircraft: Aircraft, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.aircraft = aircraft
+        self._generation_busy = False
+        self._generation_revision = 0
+        self._request_revision = 0
+        self._generated_route: GeneratedRoute | None = None
+        self._generation_worker: FlightPlanDBWorker | None = None
+        self._closed = False
         self._editor_columns = 0
         self.setWindowTitle("Aircraft")
         self.setModal(False)
@@ -1847,6 +1927,9 @@ class AircraftEditorDialog(QDialog):
         self.setStyleSheet(DIALOG_STYLESHEET)
         self._build_widgets()
         self._load_aircraft()
+        for field in (self.departure, self.arrival, self.cruise_altitude, self.cruise_speed):
+            field.textChanged.connect(self._invalidate_generation)
+        self.route_text.textChanged.connect(self._invalidate_generation)
         self.resize(760, 660)
 
     def _build_widgets(self) -> None:
@@ -1911,9 +1994,14 @@ class AircraftEditorDialog(QDialog):
         self.cruise_speed = _dialog_line()
         self.remarks = QPlainTextEdit()
         self.remarks.setMinimumHeight(46)
-        flightplandb = QPushButton("FlightPlanDB")
-        flightplandb.setMinimumHeight(30)
-        flightplandb.clicked.connect(self._show_flightplandb_placeholder)
+        self.flightplandb_button = QPushButton("FlightPlanDB")
+        self.flightplandb_button.setMinimumHeight(30)
+        self.flightplandb_button.clicked.connect(self._generate_flightplandb)
+        self.flightplandb_status = QLabel()
+        self.flightplandb_status.setWordWrap(True)
+        self.suggest_checkpoints_button = QPushButton("Suggest checkpoints")
+        self.suggest_checkpoints_button.setEnabled(False)
+        self.suggest_checkpoints_button.clicked.connect(self._suggest_checkpoints)
 
         flight_plan = QGroupBox("Flight Plan")
         self.fp_grid = QGridLayout(flight_plan)
@@ -1928,10 +2016,14 @@ class AircraftEditorDialog(QDialog):
             _dialog_field("Enroute Time", self.enroute_time),
             _dialog_field("Cruise Altitude", self.cruise_altitude),
             _dialog_field("Cruise Airspeed", self.cruise_speed),
-            flightplandb,
+            self.flightplandb_button,
+            self.suggest_checkpoints_button,
         ]
-        self.route_field = _dialog_field("Route", self.route_text)
+        self.route_field = _dialog_field("FlighPlan", self.route_text)
         self.remarks_field = _dialog_field("Remarks", self.remarks)
+        self.checkpoints_text = QPlainTextEdit()
+        self.checkpoints_text.setMinimumHeight(58)
+        self.checkpoints_field = _dialog_field("Checkpoints", self.checkpoints_text)
         body_layout.addWidget(flight_plan)
 
         self.delay_min = _dialog_int(0, 999, 1)
@@ -1954,15 +2046,16 @@ class AircraftEditorDialog(QDialog):
         body_layout.addWidget(euroscope)
         body_layout.addStretch(1)
         layout.addWidget(scroll, 1)
+        layout.addWidget(self.flightplandb_status)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        save = QPushButton("Save")
-        save.setObjectName("DialogPrimaryButton")
+        self.save_button = QPushButton("Save")
+        self.save_button.setObjectName("DialogPrimaryButton")
         close = QPushButton("Close")
-        save.clicked.connect(self._save)
+        self.save_button.clicked.connect(self._save)
         close.clicked.connect(self.close)
-        footer.addWidget(save)
+        footer.addWidget(self.save_button)
         footer.addWidget(close)
         layout.addLayout(footer)
         self._layout_editor_fields()
@@ -1981,6 +2074,7 @@ class AircraftEditorDialog(QDialog):
         next_row = self._populate_grid(self.fp_grid, self.flight_plan_fields, columns)
         self.fp_grid.addWidget(self.route_field, next_row, 0, 1, columns)
         self.fp_grid.addWidget(self.remarks_field, next_row + 1, 0, 1, columns)
+        self.fp_grid.addWidget(self.checkpoints_field, next_row + 2, 0, 1, columns)
         self._populate_grid(self.es_grid, self.euroscope_fields, columns)
 
     def _populate_grid(self, grid: QGridLayout, widgets: list[QWidget], columns: int) -> int:
@@ -2012,6 +2106,7 @@ class AircraftEditorDialog(QDialog):
         self.arrival.setText(aircraft.flight_plan.arrival)
         self.flight_type.setCurrentText(_flight_type_label(aircraft.flight_plan.flight_type))
         self.route_text.setPlainText(aircraft.flight_plan.route_text)
+        self.checkpoints_text.setPlainText(aircraft.editor_route)
         self.departure_time.setText(aircraft.flight_plan.departure_time or "0000")
         self.enroute_time.setText(aircraft.flight_plan.enroute_time or "0000")
         self.cruise_altitude.setText(aircraft.flight_plan.cruise_altitude)
@@ -2036,6 +2131,7 @@ class AircraftEditorDialog(QDialog):
             "flight_plan.arrival": self.arrival.text().strip().upper(),
             "flight_plan.flight_type": self.flight_type.currentText()[:1].upper(),
             "flight_plan.route_text": self.route_text.toPlainText().strip().upper(),
+            "editor_route": " ".join(self.checkpoints_text.toPlainText().upper().split()),
             "flight_plan.departure_time": self.departure_time.text().strip(),
             "flight_plan.enroute_time": self.enroute_time.text().strip(),
             "flight_plan.cruise_altitude": self.cruise_altitude.text().strip(),
@@ -2046,6 +2142,8 @@ class AircraftEditorDialog(QDialog):
         }
 
     def _save(self) -> None:
+        if self._generation_busy:
+            return
         aircraft = self.aircraft
         for name, value in self._editor_values().items():
             if value == self._loaded_editor_values[name]:
@@ -2061,12 +2159,81 @@ class AircraftEditorDialog(QDialog):
         self.aircraft_saved.emit(aircraft)
         self.close()
 
-    def _show_flightplandb_placeholder(self) -> None:
-        QMessageBox.information(
-            self,
-            "FlightPlanDB",
-            "FlightPlanDB querying is reserved for the next slice.",
-        )
+    @Slot()
+    def _invalidate_generation(self) -> None:
+        self._generation_revision += 1
+        self._generated_route = None
+        self.suggest_checkpoints_button.setEnabled(False)
+
+    def _generate_flightplandb(self) -> None:
+        if self._generation_busy or self._closed:
+            return
+        try:
+            inputs = generation_inputs(self.departure.text(), self.arrival.text(),
+                                       self.cruise_altitude.text(), self.cruise_speed.text())
+            if not os.environ.get("FLIGHTPLANDB_API_KEY", "").strip():
+                raise FlightPlanDBError("credentials", "Set FLIGHTPLANDB_API_KEY in the project's .env file or your environment, then restart the app.")
+        except FlightPlanDBError as error:
+            self.flightplandb_status.setText(str(error))
+            return
+        self._invalidate_generation()
+        self._request_revision = self._generation_revision
+        self._generation_busy = True
+        self.flightplandb_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.flightplandb_status.setText("Generating…")
+        self._generation_worker = FlightPlanDBWorker(inputs)
+        self._generation_worker.completed.connect(self._generation_completed)
+        self._generation_worker.start()
+
+    @Slot(object)
+    def _generation_completed(self, result: GeneratedRoute | FlightPlanDBError) -> None:
+        if self._closed:
+            return
+        self._generation_busy = False
+        self._generation_worker = None
+        self.flightplandb_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        if self._request_revision != self._generation_revision:
+            self.flightplandb_status.setText("Inputs or route changed while generating. Result discarded; generate again to use the new values.")
+            return
+        if isinstance(result, FlightPlanDBError):
+            self.flightplandb_status.setText(str(result))
+            return
+        self.route_text.setPlainText(result.route_text)
+        self._generated_route = result
+        self.suggest_checkpoints_button.setEnabled(True)
+        summary = f"{result.nodes[0].ident} → {result.nodes[-1].ident}: {len(result.nodes)} waypoints"
+        if result.distance_nm is not None:
+            summary += f", {result.distance_nm:.1f} NM"
+        if result.quota is not None:
+            summary += f". Requests used: {result.quota[0]} / {result.quota[1]}"
+        self.flightplandb_status.setText(summary + ". Route imported into draft. Press Save to apply.")
+
+    def _suggest_checkpoints(self) -> None:
+        result = self._generated_route
+        if result is None or self._generation_busy:
+            return
+        revision = self._generation_revision
+        preview = CheckpointPreviewDialog(result, self.checkpoints_text.toPlainText(),
+                                          self.latitude.value(), self.longitude.value(),
+                                          self.heading.value(), self)
+        if preview.exec() == QDialog.DialogCode.Accepted and revision == self._generation_revision and not self._closed:
+            self.checkpoints_text.setPlainText(" ".join(preview.route_text.toPlainText().upper().split()))
+        preview.deleteLater()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._cancel_generation()
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        self._cancel_generation()
+        super().reject()
+
+    def _cancel_generation(self) -> None:
+        self._closed = True
+        if self._generation_worker is not None:
+            self._generation_worker.cancel.set()
 
 
 class DiagramDialog(QDialog):
